@@ -166,6 +166,13 @@ def get_active_sessions_for_user(chat_id_int: int):
     prefix = f"{chat_id_int}_"
     return [k for k in user_sessions.keys() if k.startswith(prefix) and user_sessions[k].get("running")]
 
+# Naye session ko poori tarah clean karke save karne ka function
+def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
+    accs = load_accounts()
+    # Puraane sabhi data ko hata kar sirf is active phone ka naya aur fresh session save karein
+    accs[uid_str] = {phone: sess_json}
+    save_accounts(accs)
+
 async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
     global last_sync_ts
     try:
@@ -187,15 +194,11 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
         b_arr = await tg_file.download_as_bytearray()
         sess_json = json.loads(b_arr.decode("utf-8"))
         if isinstance(sess_json, dict) and len(sess_json) > 0:
-            accs = load_accounts()
-            if uid not in accs or not isinstance(accs[uid], dict):
-                accs[uid] = {}
-            accs[uid] = {phone: sess_json}
-            save_accounts(accs)
+            save_user_session_clean(uid, phone, sess_json)
             await context.bot.set_my_description(description="", language_code="zu")
             await context.bot.send_message(
                 chat_id=int(uid),
-                text=f"✅ **Account `{phone}` ka Login Session Auto-Update Ho Gaya!**\n\nAb `/start` dabakar matching shuru karein.",
+                text=f"✅ **Account `{phone}` ka Login Session Fresh Sync Ho Gaya!**\n\nAb `/start` dabakar matching shuru karein.",
                 parse_mode="Markdown"
             )
     except Exception:
@@ -218,7 +221,6 @@ async def check_is_login_page(page) -> bool:
     except Exception:
         return False
 
-# Screenshot 15 jaisa clean alert bina bookmark code ke
 async def send_login_expired_alert(chat_id, phone, s_key, page, context, query_or_msg=None):
     try:
         shot = await page.screenshot()
@@ -708,11 +710,6 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ASK_PHONE
     chat_id = str(update.effective_chat.id)
     context.user_data['temp_phone'] = phone
-    accounts = load_accounts()
-    if chat_id not in accounts or not isinstance(accounts[chat_id], dict):
-        accounts[chat_id] = {}
-    accounts[chat_id] = {phone: {}}
-    save_accounts(accounts)
     
     bm = generate_user_bookmarklet(chat_id, phone)
     msg = (
@@ -741,11 +738,10 @@ async def get_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("❌ File sahi nahi hai! Bookmark run karein ya valid JSON bhejein:", reply_markup=ReplyKeyboardRemove())
         return ASK_SESSION
-    accounts = load_accounts()
-    if chat_id not in accounts:
-        accounts[chat_id] = {}
-    accounts[chat_id] = {phone: parsed_json}
-    save_accounts(accounts)
+    
+    # Naye session ko clean tareeqe se save karein (purana delete karke naya save hoga)
+    save_user_session_clean(chat_id, phone, parsed_json)
+    
     await update.message.reply_text(f"🎉 **Account `{phone}` Save Ho Gaya!**\nAb matching ke liye `/start` karein.", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
     return ConversationHandler.END
 
@@ -919,7 +915,7 @@ async def matching_monitor(session_key, page, context):
                     break
                 after_text = await page.inner_text("body")
                 if any(k in after_text for k in ["Countdown to Expiry", "Use Mobile Scan code", "Matched, pending payment"]):
-                    await send_order_matched_alert(session_key, page, context, after_text)
+                    await send_order_matched_alert(s_key, page, context, after_text)
                     break
                 phone = user_sessions[session_key].get("phone", "")
                 shot = await page.screenshot()
