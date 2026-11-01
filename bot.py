@@ -1,4 +1,4 @@
-import asyncio, re, json, os, io, html, wave, struct, math, threading
+import asyncio, re, json, os, io, wave, struct, math, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -8,12 +8,17 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
-# Free Naya Token
 BOT_TOKEN = "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE"
+
+# Channel / Group & Paid Bot configuration
+FORCE_CHANNEL = "@arbsupportagent"
+FORCE_CHANNEL_LINK = "https://t.me/arbsupportagent"
+PAID_BOT_LINK = "https://t.me/Arbpayalert_bot"
 
 ACCOUNTS_FILE = "accounts_session.json"
 CONFIG_FILE = "last_configs.json"
 BM_NOTIFIED_FILE = "bookmark_notified.json"
+DAILY_USAGE_FILE = "daily_usage.json"
 
 ASK_PHONE, ASK_SESSION = range(2)
 user_sessions = {}
@@ -39,7 +44,7 @@ class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is alive!")
+        self.wfile.write(b"Free Trial Bot Active!")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8000))
@@ -49,8 +54,8 @@ def run_dummy_server():
 def get_ist_now():
     return datetime.now(IST)
 
-def get_ist_now_str():
-    return get_ist_now().strftime("%Y-%m-%d %I:%M:%S %p")
+def get_ist_date_str():
+    return get_ist_now().strftime("%Y-%m-%d")
 
 def fmt_num(v: float) -> str:
     return str(int(round(v))) if abs(v - round(v)) < 0.01 else f"{v:.2f}"
@@ -68,16 +73,42 @@ def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
 
-def load_bm_notified():
-    return load_json(BM_NOTIFIED_FILE, {})
+def check_user_daily_limit(user_id: int) -> bool:
+    data = load_json(DAILY_USAGE_FILE, {})
+    today = get_ist_date_str()
+    u_key = str(user_id)
+    if u_key not in data or data[u_key].get("date") != today:
+        data[u_key] = {"date": today, "count": 0}
+        save_json(DAILY_USAGE_FILE, data)
+        return True
+    return data[u_key].get("count", 0) < 2
 
-def is_bm_notified(uid, phone) -> bool:
-    return bool(load_bm_notified().get(f"{uid}_{phone}", False))
+def increment_user_daily_count(user_id: int) -> int:
+    data = load_json(DAILY_USAGE_FILE, {})
+    today = get_ist_date_str()
+    u_key = str(user_id)
+    if u_key not in data or data[u_key].get("date") != today:
+        data[u_key] = {"date": today, "count": 1}
+    else:
+        data[u_key]["count"] = data[u_key].get("count", 0) + 1
+    save_json(DAILY_USAGE_FILE, data)
+    return data[u_key]["count"]
 
-def mark_bm_notified(uid, phone):
-    d = load_bm_notified()
-    d[f"{uid}_{phone}"] = True
-    save_json(BM_NOTIFIED_FILE, d)
+async def is_member_of_group(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id=FORCE_CHANNEL, user_id=user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
+        return False
+    except Exception:
+        # Fallback agar bot group me admin na ho
+        return True
+
+def get_force_join_markup():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Join Support Group", url=FORCE_CHANNEL_LINK)],
+        [InlineKeyboardButton("✅ Check Membership", callback_data="check_join")]
+    ])
 
 def generate_user_bookmarklet(uid, phone) -> str:
     return (
@@ -132,8 +163,7 @@ def load_accounts():
 
 def get_user_accounts(user_id: int):
     all_acc_db = load_accounts()
-    uid_str = str(user_id)
-    return dict(all_acc_db.get(uid_str, {}))
+    return dict(all_acc_db.get(str(user_id), {}))
 
 def save_accounts(data):
     save_json(ACCOUNTS_FILE, data)
@@ -168,11 +198,10 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
                 accs[uid] = {}
             accs[uid][phone] = sess_json
             save_accounts(accs)
-            mark_bm_notified(uid, phone)
             await context.bot.set_my_description(description="", language_code="zu")
             await context.bot.send_message(
                 chat_id=int(uid),
-                text=f"✅ **Account `{phone}` ka Login Session Bookmark se Auto-Update Ho Gaya!**\n\nAb `/start` dabakar matching shuru karein.",
+                text=f"✅ **Account `{phone}` Login Session Sync Ho Gaya!**\n\nAb `/start` dabakar matching shuru karein.",
                 parse_mode="Markdown"
             )
     except Exception:
@@ -226,37 +255,61 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_id = user.id
     chat_id_int = update.effective_chat.id
+
+    # 1. Check Force Group Join
+    is_joined = await is_member_of_group(user_id, context)
+    if not is_joined:
+        join_msg = (
+            "⚠️ **Group Join Karna Zaroori Hai!**\n\n"
+            "Is Free Bot ko use karne ke liye pehle hamare official group ko join karein.\n\n"
+            f"👉 Niche diye gaye link par click karke join karein aur fir **'Check Membership'** dabayein."
+        )
+        if update.callback_query:
+            await update.callback_query.edit_message_text(join_msg, reply_markup=get_force_join_markup(), parse_mode="Markdown")
+        else:
+            await update.message.reply_text(join_msg, reply_markup=get_force_join_markup(), parse_mode="Markdown")
+        return
+
+    # 2. Check Daily Limit
+    can_use = check_user_daily_limit(user_id)
+    if not can_use:
+        limit_msg = (
+            "⛔ **Aapki Daily Free Trial Limit Khatam Ho Gayi Hai!**\n\n"
+            "Free Bot me rozana sirf **2 Orders Match** karne ki limit hai.\n\n"
+            "🚀 **Unlimited Orders, Fast Matching & Premium Features ke liye hamara Full Bot use karein:**\n"
+            f"👉 [Click Here To Open Arbpay Bot]({PAID_BOT_LINK})"
+        )
+        if update.callback_query:
+            await update.callback_query.edit_message_text(limit_msg, parse_mode="Markdown", disable_web_page_preview=True)
+        else:
+            await update.message.reply_text(limit_msg, parse_mode="Markdown", disable_web_page_preview=True)
+        return
+
     context.user_data.clear()
-    
     accounts = get_user_accounts(user_id)
     active_keys = get_active_sessions_for_user(chat_id_int)
     active_phones = [user_sessions[k].get("phone", "") for k in active_keys]
-    
+
     buttons = []
     for phone in accounts.keys():
         if phone in active_phones:
             buttons.append([InlineKeyboardButton(f"🟢 {phone} (Running - Stop)", callback_data=f"stop_{phone}")])
         else:
             buttons.append([InlineKeyboardButton(f"📱 {phone} (Start)", callback_data=f"choose_{phone}")])
-    
+
     buttons.append([InlineKeyboardButton("➕ Add Account", callback_data="add_acc")])
     if active_keys:
         buttons.append([InlineKeyboardButton("⛔ Stop All Tasks", callback_data="stop_all")])
-    
-    txt = "👋 **AR Wallet Bot (Free Edition)**\n⚡ Limit: 1 Active Session Per User\n\nApna account chunein ya naya add karein:"
+
+    txt = (
+        "👋 **AR Wallet Free Trial Bot**\n"
+        "⚡ Daily Limit: **2 Orders / Day**\n\n"
+        "Apna registered account chunein ya naya add karein:"
+    )
     if update.callback_query:
         await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-
-async def commands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "🛠 **Available Bot Commands:**\n\n"
-        "• `/start` - Bot open aur account list dekhne ke liye.\n"
-        "• `/detail` - Orders, Buy aur Commission report.\n"
-        "• `/stop` - Running matching process ko stop karne ke liye."
-    )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def dismiss_all_popups(page):
     for _ in range(4):
@@ -276,304 +329,14 @@ async def dismiss_all_popups(page):
                             }
                         }
                     }
-                    const txt = document.body.innerText || '';
-                    if (txt.includes('To handle') || txt.includes('is offline')) {
-                        const icons = Array.from(document.querySelectorAll('i, svg, [class*="close"], [class*="cross"]'));
-                        for (let ic of icons) {
-                            ic.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                            hit = true;
-                        }
-                    }
                     return hit;
                 }
             """)
-            body = await page.inner_text("body")
-            if "Auto Wallet" in body or "Not on the app" in body or "Official APP" in body or "Close" in body:
-                close_loc = page.locator('text="Close"')
-                if await close_loc.count() > 0:
-                    for i in range(await close_loc.count()):
-                        box = await close_loc.nth(i).bounding_box()
-                        if box and box["width"] > 20 and box["height"] < 90:
-                            await page.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                            await asyncio.sleep(0.4)
-                await page.touchscreen.tap(195, 682)
-                await asyncio.sleep(0.5)
-            elif "is offline" in body or "To handle" in body:
-                await page.touchscreen.tap(324, 262)
-                await asyncio.sleep(0.5)
-            elif not clicked:
+            await asyncio.sleep(0.4)
+            if not clicked:
                 break
         except Exception:
             break
-
-async def fetch_order_section_data(user_id_str, phone, session_data):
-    if not session_data:
-        return {"expired": True, "orders": []}
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
-            ctx = await browser.new_context(viewport={"width": 390, "height": 844}, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", has_touch=True)
-            page = await ctx.new_page()
-            try:
-                base_url = "https://clbsk.paywivo.com"
-                try:
-                    await page.goto(base_url, wait_until="commit", timeout=20000)
-                except Exception:
-                    base_url = "https://arbpay.ai"
-                    await page.goto(base_url, wait_until="commit", timeout=25000)
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(1.5)
-                await page.evaluate(r"""
-                    (storageMap) => {
-                        for (let k in storageMap) {
-                            const val = typeof storageMap[k] === 'object' ? JSON.stringify(storageMap[k]) : storageMap[k];
-                            localStorage.setItem(k, val);
-                        }
-                    }
-                """, session_data)
-                await page.goto(f"{base_url}/#/order", wait_until="domcontentloaded", timeout=20000)
-                await asyncio.sleep(3.5)
-                if await check_is_login_page(page):
-                    await browser.close()
-                    return {"expired": True, "orders": []}
-                await dismiss_all_popups(page)
-                await page.evaluate(r"""
-                    () => {
-                        const tabs = Array.from(document.querySelectorAll('*'));
-                        for (let el of tabs) {
-                            if ((el.innerText || '').trim() === 'My Purchases') {
-                                el.click();
-                                break;
-                            }
-                        }
-                    }
-                """)
-                await asyncio.sleep(1.8)
-                day_before_str = (get_ist_now() - timedelta(days=2)).strftime("%Y-%m-%d")
-                collected_orders = {}
-                pattern = re.compile(
-                    r'(Completed|Complete)\s+Amount\s+₹\s*([0-9,]+(?:\.[0-9]{1,2})?)(?:(?!Order Number|Canceled).){1,260}?Time\s+([0-9]{4}-[0-9]{2}-[0-9]{2})\s+([0-9:]+)(?:(?!Order Number).){1,160}?Order Number\s+([A-Za-z0-9]+)',
-                    re.DOTALL | re.IGNORECASE
-                )
-                old_hits = 0
-                for _ in range(20):
-                    body_txt = await page.inner_text("body")
-                    oldest_seen = None
-                    for match in pattern.finditer(body_txt):
-                        _, amt_s, dt_s, _, ord_id = match.groups()
-                        dt_clean = dt_s.strip()
-                        oldest_seen = dt_clean
-                        collected_orders[ord_id] = {"id": ord_id, "amount": float(amt_s.replace(",", "")), "date": dt_clean}
-                    if oldest_seen and oldest_seen < day_before_str:
-                        old_hits += 1
-                        if old_hits >= 2:
-                            break
-                    await page.evaluate(r"""
-                        () => {
-                            window.scrollBy(0, 520);
-                            const els = Array.from(document.querySelectorAll('*'));
-                            for (let el of els) {
-                                if (el.scrollHeight > el.clientHeight + 20) el.scrollTop += 520;
-                            }
-                        }
-                    """)
-                    await page.mouse.wheel(0, 520)
-                    await asyncio.sleep(0.55)
-                await browser.close()
-                return {"expired": False, "orders": list(collected_orders.values())}
-            except Exception:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-                return {"expired": False, "orders": []}
-    except Exception:
-        return {"expired": False, "orders": []}
-
-async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    wait_msg = await update.message.reply_text("⏳ Syncing Short Report...")
-    now = get_ist_now()
-    today_str = now.strftime("%Y-%m-%d")
-    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    day_before_str = (now - timedelta(days=2)).strftime("%Y-%m-%d")
-    user_id_str = str(user_id)
-    user_accounts = get_user_accounts(user_id)
-    if not user_accounts:
-        await wait_msg.edit_text("ℹ️ Koi account nahi mila. `/start` dabakar `➕ Add Account` karein.", parse_mode="Markdown")
-        return
-
-    report = "📊 **Short Order Report (/detail)**\n────────────────────\n"
-    expired_buttons = []
-    idx = 1
-    sum_t_cnt = sum_y_cnt = sum_db_cnt = 0
-    sum_t_amt = sum_y_amt = sum_db_amt = 0.0
-    sum_t_comm = sum_y_comm = sum_db_comm = 0.0
-
-    for phone, session_data in list(user_accounts.items()):
-        res = await fetch_order_section_data(user_id_str, phone, session_data)
-        if res.get("expired"):
-            report += f"⚠️ **`{phone}`**: Login Expired!\n────────────────────\n"
-            expired_buttons.append([InlineKeyboardButton(f"🔄 Update ({phone})", callback_data=f"update_sess_{phone}")])
-            continue
-        t_cnt = y_cnt = db_cnt = 0
-        t_amt = y_amt = db_amt = 0.0
-        t_comm = y_comm = db_comm = 0.0
-        for o in res.get("orders", []):
-            amt, dt = o["amount"], o["date"]
-            c_val = calculate_commission(amt)
-            if dt == today_str:
-                t_cnt += 1; t_amt += amt; t_comm += c_val
-            elif dt == yesterday_str:
-                y_cnt += 1; y_amt += amt; y_comm += c_val
-            elif dt == day_before_str:
-                db_cnt += 1; db_amt += amt; db_comm += c_val
-
-        a_cnt = t_cnt + y_cnt + db_cnt
-        a_amt = t_amt + y_amt + db_amt
-        a_comm = t_comm + y_comm + db_comm
-
-        sum_t_cnt += t_cnt; sum_y_cnt += y_cnt; sum_db_cnt += db_cnt
-        sum_t_amt += t_amt; sum_y_amt += y_amt; sum_db_amt += db_amt
-        sum_t_comm += t_comm; sum_y_comm += y_comm; sum_db_comm += db_comm
-
-        report += (
-            f"📱 **Account #{idx}: `{phone}`**\n"
-            f"• **Today:** Order {t_cnt} | Buy ₹{fmt_num(t_amt)} | Commission ₹{fmt_num(t_comm)}\n"
-            f"• **Yesterday:** Order {y_cnt} | Buy ₹{fmt_num(y_amt)} | Commission ₹{fmt_num(y_comm)}\n"
-            f"• **Day Before:** Order {db_cnt} | Buy ₹{fmt_num(db_amt)} | Commission ₹{fmt_num(db_comm)}\n"
-            f"∑ **3-Days Total:** Order {a_cnt} | Buy ₹{fmt_num(a_amt)} | **Commission ₹{fmt_num(a_comm)}**\n"
-            f"────────────────────\n"
-        )
-        idx += 1
-
-    if len(user_accounts) > 1:
-        g_cnt = sum_t_cnt + sum_y_cnt + sum_db_cnt
-        g_amt = sum_t_amt + sum_y_amt + sum_db_amt
-        g_comm = sum_t_comm + sum_y_comm + sum_db_comm
-        report += (
-            f"📊 **KUL TOTAL:**\n"
-            f"• **Today:** Order {sum_t_cnt} | Buy ₹{fmt_num(sum_t_amt)} | Commission ₹{fmt_num(sum_t_comm)}\n"
-            f"• **Yesterday:** Order {sum_y_cnt} | Buy ₹{fmt_num(sum_y_amt)} | Commission ₹{fmt_num(sum_y_comm)}\n"
-            f"• **Day Before:** Order {sum_db_cnt} | Buy ₹{fmt_num(sum_db_amt)} | Commission ₹{fmt_num(sum_db_comm)}\n"
-            f"🏆 **3-Days Grand Total:** Order {g_cnt} | Buy ₹{fmt_num(g_amt)} | **Commission ₹{fmt_num(g_comm)}**"
-        )
-
-    markup = InlineKeyboardMarkup(expired_buttons) if expired_buttons else None
-    try:
-        await wait_msg.edit_text(report, reply_markup=markup, parse_mode="Markdown")
-    except Exception:
-        await update.message.reply_text(report, reply_markup=markup, parse_mode="Markdown")
-
-async def add_acc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("👉 Apna **10-digit Phone Number** bhejein:", parse_mode="Markdown")
-    return ASK_PHONE
-
-async def update_expired_session_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    phone = query.data.replace("update_sess_", "")
-    chat_id = update.effective_chat.id
-    s_key = f"{chat_id}_{phone}"
-    if s_key in user_sessions:
-        await stop_single_session(s_key, context, notify=False)
-    context.user_data['temp_phone'] = phone
-    bm = generate_user_bookmarklet(chat_id, phone)
-    prompt_txt = (
-        f"📱 **Account: `{phone}`**\n\n"
-        f"🔖 **Auto-Login Bookmark (`{phone}`):**\n`{bm}`\n\n"
-        f"👉 Upar diya bookmark portal par login karke tap karein ya session JSON file bhejein:"
-    )
-    try:
-        if query.message and query.message.photo:
-            await query.edit_message_caption(caption=prompt_txt, reply_markup=None, parse_mode="Markdown")
-        else:
-            await query.edit_message_text(text=prompt_txt, reply_markup=None, parse_mode="Markdown")
-    except Exception:
-        await query.message.reply_text(prompt_txt, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-    return ASK_SESSION
-
-async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text.strip()
-    if not phone.isdigit() or len(phone) != 10:
-        await update.message.reply_text("❌ Sahi 10-digit number dalein:", reply_markup=ReplyKeyboardRemove())
-        return ASK_PHONE
-    chat_id = str(update.effective_chat.id)
-    context.user_data['temp_phone'] = phone
-    accounts = load_accounts()
-    if chat_id not in accounts or not isinstance(accounts[chat_id], dict):
-        accounts[chat_id] = {}
-    if phone not in accounts[chat_id]:
-        accounts[chat_id][phone] = {}
-        save_accounts(accounts)
-    mark_bm_notified(chat_id, phone)
-    bm = generate_user_bookmarklet(chat_id, phone)
-    msg = (
-        f"✅ **Number `{phone}` Register Ho Gaya!**\n\n"
-        f"🔖 **Aapka `{phone}` Auto-Login Bookmark:**\n\n"
-        f"`{bm}`\n\n"
-        f"📌 **Kaise Use Karein:**\n"
-        f"1. Browser me is code ka Bookmark banayein.\n"
-        f"2. Portal me `{phone}` login karke ye Bookmark dabayein.\n"
-        f"3. Session auto-sync ho jayega! Fir `/start` karein."
-    )
-    await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-    return ConversationHandler.END
-
-async def get_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = context.user_data.get('temp_phone')
-    chat_id = str(update.effective_chat.id)
-    if update.message.document:
-        doc_file = await update.message.document.get_file()
-        byte_data = await doc_file.download_as_bytearray()
-        raw_data = byte_data.decode('utf-8')
-    else:
-        raw_data = update.message.text.strip()
-    try:
-        parsed_json = json.loads(raw_data)
-    except Exception:
-        await update.message.reply_text("❌ File sahi nahi hai! Bookmark run karein ya valid JSON bhejein:", reply_markup=ReplyKeyboardRemove())
-        return ASK_SESSION
-    accounts = load_accounts()
-    if chat_id not in accounts:
-        accounts[chat_id] = {}
-    accounts[chat_id][phone] = parsed_json
-    save_accounts(accounts)
-    await update.message.reply_text(f"🎉 **Account `{phone}` Save Ho Gaya!**\nAb chalane ke liye `/start` dabayein.", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-    return ConversationHandler.END
-
-async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("Process cancel ho gaya. /start karein.", reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END
-
-async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await stop_all_user_sessions(update.effective_chat.id, context)
-
-async def stop_single_session(session_key, context, notify=True):
-    if session_key in user_sessions:
-        s = user_sessions[session_key]
-        s["running"] = False
-        try:
-            if "browser" in s:
-                await s["browser"].close()
-        except Exception:
-            pass
-        phone = s.get("phone", "")
-        chat_id = s.get("chat_id")
-        del user_sessions[session_key]
-        if notify:
-            await context.bot.send_message(chat_id, f"🛑 **Session STOP ho gaya** ({phone}).", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-
-async def stop_all_user_sessions(chat_id_int, context):
-    active_keys = get_active_sessions_for_user(chat_id_int)
-    if active_keys:
-        for k in list(active_keys):
-            await stop_single_session(k, context)
-    else:
-        await context.bot.send_message(chat_id_int, "ℹ️ Koi active running task nahi hai.", reply_markup=ReplyKeyboardRemove())
 
 async def extract_exact_amount(page, body_text: str) -> str:
     try:
@@ -616,19 +379,33 @@ async def send_order_matched_alert(session_key, page, context, body_text):
     comm = calculate_commission(clean_num)
     photo = await page.screenshot()
     s["running"] = False
-    buttons = [[InlineKeyboardButton("🔁 Repeat Order", callback_data=f"orderrepeat_{phone}")]]
+
+    # Increment order count
+    count = increment_user_daily_count(chat_id)
+
+    caption_text = (
+        f"🚨🚨 **ORDER MATCH HO GAYA!** 🔔\n\n"
+        f"📱 **Account: `{phone}`**\n"
+        f"💰 **Amount: ₹ {amt}**\n"
+        f"💵 **Commission: +₹ {comm}**\n\n"
+        f"📊 **Aapke Aaj Ke Orders:** `{count}/2`\n"
+    )
+
+    if count >= 2:
+        caption_text += (
+            "\n⚠️ **Aapki Free Trial Limit Khatam Ho Gayi Hai!**\n"
+            f"👉 Unlimited orders ke liye hamare paid bot par switch karein: [Arbpay Bot]({PAID_BOT_LINK})"
+        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Go to Unlimited Bot", url=PAID_BOT_LINK)]])
+    else:
+        buttons = [[InlineKeyboardButton("🔁 Repeat Order", callback_data=f"orderrepeat_{phone}")]]
+        markup = InlineKeyboardMarkup(buttons)
+
     await context.bot.send_photo(
         chat_id,
         photo=photo,
-        caption=(
-            f"🚨🚨 **ORDER MATCH HO GAYA!** 🔔\n\n"
-            f"📱 **Account: `{phone}`**\n"
-            f"💰 **Amount: ₹ {amt}**\n"
-            f"💵 **Commission: +₹ {comm}**\n"
-            f"⚡ Countdown timer shuru ho gaya hai!\n"
-            f"Turant payment complete karein!"
-        ),
-        reply_markup=InlineKeyboardMarkup(buttons),
+        caption=caption_text,
+        reply_markup=markup,
         parse_mode="Markdown"
     )
     try:
@@ -650,49 +427,32 @@ async def click_back_to_order_list_clean(page):
         try:
             body = await page.inner_text("body")
             if "Cancel Matching" in body:
-                res_c = await page.evaluate(r"""
+                await page.evaluate(r"""
                     () => {
                         const all = Array.from(document.querySelectorAll('button, div, span, a, p'));
                         for (let el of all.reverse()) {
-                            const t = (el.innerText || '').trim();
-                            if (t.includes('Cancel Matching') && el.offsetParent !== null) {
-                                const r = el.getBoundingClientRect();
-                                if (r.width > 20 && r.height > 10 && r.height < 100) {
-                                    el.click();
-                                    return { ok: true, x: r.left + r.width/2, y: r.top + r.height/2 };
-                                }
+                            if ((el.innerText || '').trim().includes('Cancel Matching')) {
+                                el.click();
+                                break;
                             }
                         }
-                        return { ok: false };
                     }
                 """)
-                if res_c.get("ok"):
-                    await page.touchscreen.tap(res_c["x"], res_c["y"])
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(1.2)
             body = await page.inner_text("body")
             if "Back to Order List" in body or "No match found" in body:
-                res_b = await page.evaluate(r"""
+                await page.evaluate(r"""
                     () => {
                         const all = Array.from(document.querySelectorAll('button, div, span, a, p'));
                         for (let el of all.reverse()) {
-                            const t = (el.innerText || '').trim();
-                            if (t.includes('Back to Order List') && el.offsetParent !== null) {
-                                const r = el.getBoundingClientRect();
-                                if (r.width > 20 && r.height > 10 && r.height < 100) {
-                                    el.click();
-                                    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                    return { ok: true, x: r.left + r.width/2, y: r.top + r.height/2 };
-                                }
+                            if ((el.innerText || '').trim().includes('Back to Order List')) {
+                                el.click();
+                                break;
                             }
                         }
-                        return { ok: false };
                     }
                 """)
-                if res_b.get("ok"):
-                    await page.touchscreen.tap(res_b["x"], res_b["y"])
-                else:
-                    await page.touchscreen.tap(195, 718)
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
             else:
                 break
         except Exception:
@@ -708,14 +468,10 @@ async def ensure_on_buy_page(page):
         buy_arb = page.locator('text="Buy ARB"').first
         if await buy_arb.count() > 0:
             try:
-                box = await buy_arb.bounding_box()
-                if box:
-                    await page.touchscreen.tap(box["x"] + box["width"]/2, box["y"] + box["height"]/2)
-                else:
-                    await buy_arb.click(force=True, timeout=2000)
+                await buy_arb.click(force=True, timeout=2000)
             except Exception:
                 await page.touchscreen.tap(110, 600)
-            await asyncio.sleep(2.5)
+            await asyncio.sleep(2.0)
             await dismiss_all_popups(page)
 
 async def switch_tab(page, tab_name: str):
@@ -738,7 +494,7 @@ async def switch_tab(page, tab_name: str):
             await page.touchscreen.tap(240, 128)
         else:
             await page.touchscreen.tap(125, 128)
-    await asyncio.sleep(1.2)
+    await asyncio.sleep(1.0)
     await click_back_to_order_list_clean(page)
 
 async def detect_live_payment_options(page):
@@ -776,7 +532,7 @@ async def detect_live_payment_options(page):
         if apps:
             return apps
         await page.mouse.wheel(0, 300)
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(0.5)
     return ["PhonePe"]
 
 async def click_strictly_another_account(page, app_name: str) -> bool:
@@ -802,14 +558,6 @@ async def click_strictly_another_account(page, app_name: str) -> bool:
                         for (let i = startIdx + 1; i < candidates.length; i++) {
                             const c = candidates[i];
                             if ((c.innerText || '').trim().toLowerCase() === target) {
-                                let clickable = c;
-                                for (let depth = 0; depth < 3; depth++) {
-                                    if (clickable && clickable.offsetHeight >= 35 && clickable.offsetWidth >= 150) {
-                                        clickable.click();
-                                        return true;
-                                    }
-                                    if (clickable.parentElement) clickable = clickable.parentElement;
-                                }
                                 c.click();
                                 return true;
                             }
@@ -822,7 +570,7 @@ async def click_strictly_another_account(page, app_name: str) -> bool:
         if clicked:
             return True
         await page.mouse.wheel(0, 350)
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(0.6)
     await page.touchscreen.tap(200, 715)
     return True
 
@@ -843,7 +591,7 @@ async def select_and_strictly_verify_tag(page, target_range: str) -> bool:
                 return false;
             }
         """)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.4)
     except Exception:
         pass
     for _ in range(8):
@@ -856,25 +604,20 @@ async def select_and_strictly_verify_tag(page, target_range: str) -> bool:
                     if (text === target || text === ('₹' + target)) {
                         el.scrollIntoView({ behavior: 'instant', inline: 'center', block: 'center' });
                         el.click();
-                        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                        const r = el.getBoundingClientRect();
-                        return { found: true, x: r.left + r.width/2, y: r.top + r.height/2 };
+                        return { found: true };
                     }
                 }
                 return { found: false };
             }
         """, clean_target)
         if res.get("found"):
-            tx, ty = res.get("x"), res.get("y")
-            if tx and ty:
-                await page.touchscreen.tap(tx, ty)
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(1.0)
             return True
         await page.mouse.move(340, 395)
         await page.mouse.down()
         await page.mouse.move(30, 395, steps=10)
         await page.mouse.up()
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(0.6)
     return False
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -885,10 +628,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
+    if data == "check_join":
+        is_joined = await is_member_of_group(user_id, context)
+        if is_joined:
+            await query.answer("✅ Membership verified!")
+            await start_cmd(update, context)
+        else:
+            await query.answer("❌ Abhi tak aapne group join nahi kiya!", show_alert=True)
+        return
+
+    # Check Membership & Limit before running
+    if not await is_member_of_group(user_id, context):
+        await start_cmd(update, context)
+        return
+
+    if not check_user_daily_limit(user_id):
+        await query.answer("Daily Limit Reached (2/2 Orders)!", show_alert=True)
+        await start_cmd(update, context)
+        return
+
     if data.startswith("orderrepeat_"):
         phone = data.replace("orderrepeat_", "")
         s_key = f"{chat_id}_{phone}"
-        await query.answer("🔁 Repeat Order Matching Start Ho Raha Hai...")
         confs = load_last_configs().get(phone, {})
         p_tab = confs.get("tab", "OTP-UPI")
         p_range = confs.get("range", "2001-2999")
@@ -945,7 +706,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session_data = accounts.get(phone)
         if not session_data:
             bm = generate_user_bookmarklet(chat_id, phone)
-            await query.edit_message_text(f"⚠️ **`{phone}` ka Login Session Abhi Add Nahi Hai!**\n\nPortal login karke apna `{phone}` Bookmark run karein:\n\n`{bm}`", parse_mode="Markdown")
+            await query.edit_message_text(f"⚠️ **`{phone}` Session Missing!**\nBookmark run karein:\n`{bm}`", parse_mode="Markdown")
             return
         active_keys = get_active_sessions_for_user(chat_id)
         if len(active_keys) >= 1 and s_key not in active_keys:
@@ -955,7 +716,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         confs = load_last_configs().get(phone, {})
         p_tab, p_range, p_app = confs.get("tab", "OTP-UPI"), confs.get("range", "2001-2999"), confs.get("app", "PhonePe")
         user_tab_selection[s_key], user_range_selection[s_key], user_pay_selection[s_key] = p_tab, p_range, p_app
-        await query.edit_message_text(f"🚀 **Fast Repeat Matching!**\n📱 `{phone}`\n📂 [{p_tab}] {p_range} ({p_app})\n\nStarting browser...", parse_mode="Markdown")
+        await query.edit_message_text(f"🚀 **Fast Repeat Matching!**\n📱 `{phone}`\n📂 [{p_tab}] {p_range} ({p_app})...", parse_mode="Markdown")
         asyncio.create_task(run_direct_session(chat_id, phone, session_data, context, auto_start_matching=True))
         return
 
@@ -966,7 +727,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session_data = accounts.get(phone)
         if not session_data:
             bm = generate_user_bookmarklet(chat_id, phone)
-            await query.edit_message_text(f"⚠️ **`{phone}` ka Login Session Abhi Add Nahi Hai!**\n\nPortal login karke apna `{phone}` Bookmark run karein:\n\n`{bm}`", parse_mode="Markdown")
+            await query.edit_message_text(f"⚠️ **`{phone}` Session Missing!**\nBookmark run karein:\n`{bm}`", parse_mode="Markdown")
             return
         active_keys = get_active_sessions_for_user(chat_id)
         if len(active_keys) >= 1 and s_key not in active_keys:
@@ -1016,9 +777,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await check_is_login_page(page):
             await send_login_expired_alert(chat_id, phone, s_key, page, context, query)
             return
-        await query.edit_message_text(f"⏳ **`{phone}`**: Live payment options scan ho rahe hain...", parse_mode="Markdown")
+        await query.edit_message_text(f"⏳ **`{phone}`**: Scanning options...", parse_mode="Markdown")
         await select_and_strictly_verify_tag(page, range_val)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.2)
         buy_tapped = False
         buys = page.locator('button:has-text("Buy"), div:has-text("Buy")')
         for i in range(await buys.count()):
@@ -1029,7 +790,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         if not buy_tapped:
             await page.touchscreen.tap(350, 420)
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(2.0)
         if await check_is_login_page(page):
             await send_login_expired_alert(chat_id, phone, s_key, page, context, query)
             return
@@ -1042,7 +803,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row:
             buttons.append(row)
         buttons.append([InlineKeyboardButton(f"⛔ Stop {phone}", callback_data=f"stop_{phone}")])
-        await query.edit_message_text(f"✅ **`{phone}`**\n📂 Tab: {cur_tab} | 💰 Range: {range_val}\n\n3️⃣ Live Payment Option chunein:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        await query.edit_message_text(f"✅ **`{phone}`**\n📂 Tab: {cur_tab} | 💰 Range: {range_val}\n\n3️⃣ Payment Option chunein:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
     elif data.startswith("pay_"):
         parts = data.split("_")
@@ -1055,11 +816,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_tab = user_tab_selection.get(s_key, "OTP-UPI")
         user_pay_selection[s_key] = app_name
         save_last_config(phone, target_tab, target_range, app_name)
-        await query.edit_message_text(f"⏳ **`{phone}`** ({app_name}): Matching start ki ja rahi hai...", parse_mode="Markdown")
+        await query.edit_message_text(f"⏳ **`{phone}`** ({app_name}): Starting match...", parse_mode="Markdown")
         page = user_sessions[s_key]["page"]
         try:
             await click_strictly_another_account(page, app_name)
-            await asyncio.sleep(3)
+            await asyncio.sleep(2.5)
             if await check_is_login_page(page):
                 await send_login_expired_alert(chat_id, phone, s_key, page, context, query)
                 return
@@ -1075,58 +836,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_photo(chat_id, photo=start_shot, caption=f"⚠️ Status check ({phone}):", disable_notification=True)
         except Exception as e:
             await context.bot.send_message(chat_id, f"❌ Error ({phone}): {str(e)}")
-
-async def start_matching_procedure(s_key, context):
-    session = user_sessions.get(s_key)
-    if not session:
-        return
-    page, phone, chat_id = session["page"], session["phone"], session["chat_id"]
-    target_range = user_range_selection.get(s_key, "2001-2999")
-    target_tab = user_tab_selection.get(s_key, "OTP-UPI")
-    app_name = user_pay_selection.get(s_key, "PhonePe")
-    try:
-        if await check_is_login_page(page):
-            await send_login_expired_alert(chat_id, phone, s_key, page, context)
-            return
-        await ensure_on_buy_page(page)
-        await switch_tab(page, target_tab)
-        await asyncio.sleep(1.2)
-        if await check_is_login_page(page):
-            await send_login_expired_alert(chat_id, phone, s_key, page, context)
-            return
-        await select_and_strictly_verify_tag(page, target_range)
-        await asyncio.sleep(1.5)
-        buy_tapped = False
-        buys = page.locator('button:has-text("Buy"), div:has-text("Buy")')
-        for i in range(await buys.count()):
-            box = await buys.nth(i).bounding_box()
-            if box and box['y'] > 300 and box['x'] > 200:
-                await page.touchscreen.tap(box['x'] + box['width']/2, box['y'] + box['height']/2)
-                buy_tapped = True
-                break
-        if not buy_tapped:
-            await page.touchscreen.tap(350, 420)
-        await asyncio.sleep(2.5)
-        if await check_is_login_page(page):
-            await send_login_expired_alert(chat_id, phone, s_key, page, context)
-            return
-        await click_strictly_another_account(page, app_name)
-        await asyncio.sleep(3)
-        if await check_is_login_page(page):
-            await send_login_expired_alert(chat_id, phone, s_key, page, context)
-            return
-        check_txt = await page.inner_text("body")
-        if any(k in check_txt for k in ["Countdown to Expiry", "Use Mobile Scan code", "Input or Paste UTR", "Matched, pending payment"]):
-            await send_order_matched_alert(s_key, page, context, check_txt)
-            return
-        start_shot = await page.screenshot()
-        if "Matching" in check_txt or "Searching available orders" in check_txt:
-            await context.bot.send_photo(chat_id, photo=start_shot, caption=f"🚀 **Round #1 Matching Start!** ({phone} | {target_tab}: {target_range} | {app_name})", disable_notification=True)
-            asyncio.create_task(matching_monitor(s_key, page, context))
-        else:
-            await context.bot.send_photo(chat_id, photo=start_shot, caption=f"⚠️ Status check ({phone}):", disable_notification=True)
-    except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ Error ({phone}): {str(e)}")
 
 async def run_direct_session(chat_id, phone, session_data, context, auto_start_matching=False):
     s_key = f"{chat_id}_{phone}"
@@ -1157,7 +866,7 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                     }
                 """, session_data)
                 await page.reload(wait_until="domcontentloaded")
-                await asyncio.sleep(4)
+                await asyncio.sleep(3)
                 await dismiss_all_popups(page)
                 if await check_is_login_page(page):
                     await send_login_expired_alert(chat_id, phone, s_key, page, context)
@@ -1168,7 +877,17 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                     return
                 await click_back_to_order_list_clean(page)
                 if auto_start_matching:
-                    await start_matching_procedure(s_key, context)
+                    # Direct auto repeat
+                    confs = load_last_configs().get(phone, {})
+                    target_range = confs.get("range", "2001-2999")
+                    target_tab = confs.get("tab", "OTP-UPI")
+                    app_name = confs.get("app", "PhonePe")
+                    await switch_tab(page, target_tab)
+                    await select_and_strictly_verify_tag(page, target_range)
+                    await page.touchscreen.tap(350, 420)
+                    await asyncio.sleep(2.0)
+                    await click_strictly_another_account(page, app_name)
+                    asyncio.create_task(matching_monitor(s_key, page, context))
                 else:
                     buttons = [
                         [InlineKeyboardButton("⚡ OTP-UPI", callback_data=f"tab_OTP-UPI_{phone}"), InlineKeyboardButton("🏦 BANK", callback_data=f"tab_BANK_{phone}")],
@@ -1229,7 +948,7 @@ async def matching_monitor(session_key, page, context):
                         await btn.first.click(force=True, timeout=2000)
                 else:
                     await page.touchscreen.tap(195, 510)
-                await asyncio.sleep(3.5)
+                await asyncio.sleep(3.0)
                 if await check_is_login_page(page):
                     s = user_sessions.get(session_key)
                     if s:
@@ -1246,7 +965,7 @@ async def matching_monitor(session_key, page, context):
                 except Exception:
                     pass
                 round_count += 1
-                await asyncio.sleep(16)
+                await asyncio.sleep(15)
                 continue
             await asyncio.sleep(2)
         except Exception:
@@ -1284,9 +1003,8 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("stop", stop_cmd))
     app.add_handler(CommandHandler("commands", commands_cmd))
-    app.add_handler(CommandHandler("detail", detail_cmd))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("✅ AR Wallet Free Bot Running with new token...")
+    print("✅ AR Wallet Free Trial Bot Live...")
     app.run_polling()
 
 if __name__ == "__main__":
