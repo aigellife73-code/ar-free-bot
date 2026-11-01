@@ -1,4 +1,4 @@
-import asyncio, re, json, os, io, wave, struct, math, threading
+import asyncio, re, json, os, io, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -312,6 +312,20 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
+# /detail command for paid bot conversion
+async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type in ["group", "supergroup"]:
+        return
+    
+    msg = (
+        "🔒 **Feature Locked in Free Version!**\n\n"
+        "📊 Detailed Reports, Commission Analytics, aur Daily Order History sirf **Paid / Premium Bot** me available hai.\n\n"
+        "🚀 **Full Bot me Switch karne ke liye link:**\n"
+        f"👉 [Click Here To Open Arbpay Bot]({PAID_BOT_LINK})"
+    )
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Go to Arbpay Paid Bot", url=PAID_BOT_LINK)]])
+    await update.message.reply_text(msg, reply_markup=markup, parse_mode="Markdown", disable_web_page_preview=True)
+
 # Admin command: /setcode <limit> <code>
 async def setcode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
@@ -341,11 +355,11 @@ async def setcode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ **Secret Code Saved Successfully!**\n\n"
         f"🔑 **Code:** `/{code_clean}`\n"
         f"🎁 **Reward:** +{limit_val} Daily Limit\n\n"
-        f"Ab koi bhi user `/{code_clean}` send karke yeh limit claim kar sakta hai.",
+        f"Users `/{code_clean}` enter karke limit claim kar sakte hain.",
         parse_mode="Markdown"
     )
 
-# Universal Handler for claiming codes
+# Universal handler for redeem codes
 async def text_or_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -1169,10 +1183,10 @@ def main():
     )
     
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("detail", detail_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("setcode", setcode_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
-    # Catch any text / command to verify secret codes
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, text_or_command_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
     
