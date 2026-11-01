@@ -1,4 +1,4 @@
-import asyncio, re, json, os, io, threading
+import asyncio, re, json, os, io, wave, struct, math, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -10,6 +10,10 @@ from playwright.async_api import async_playwright
 
 BOT_TOKEN = "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE"
 
+# Admin ID
+ADMIN_ID = 5773956827
+
+# Channel & Paid Bot Links
 FORCE_GROUP_USERNAME = "arbsupportagent"
 FORCE_CHANNEL_LINK = "https://t.me/arbsupportagent"
 PAID_BOT_LINK = "https://t.me/Arbpayalert_bot"
@@ -18,6 +22,7 @@ ACCOUNTS_FILE = "accounts_session.json"
 CONFIG_FILE = "last_configs.json"
 BM_NOTIFIED_FILE = "bookmark_notified.json"
 DAILY_USAGE_FILE = "daily_usage.json"
+PROMO_CODES_FILE = "promo_codes.json"
 
 ASK_PHONE, ASK_SESSION = range(2)
 user_sessions = {}
@@ -78,7 +83,7 @@ def get_user_usage_stats(user_id: int):
     today = get_ist_date_str()
     u_key = str(user_id)
     if u_key not in data or data[u_key].get("date") != today:
-        data[u_key] = {"date": today, "count": 0, "max_limit": DEFAULT_DAILY_LIMIT}
+        data[u_key] = {"date": today, "count": 0, "max_limit": DEFAULT_DAILY_LIMIT, "redeemed_codes": []}
         save_json(DAILY_USAGE_FILE, data)
         return 0, DEFAULT_DAILY_LIMIT, DEFAULT_DAILY_LIMIT
     
@@ -96,7 +101,7 @@ def increment_user_daily_count(user_id: int) -> int:
     today = get_ist_date_str()
     u_key = str(user_id)
     if u_key not in data or data[u_key].get("date") != today:
-        data[u_key] = {"date": today, "count": 1, "max_limit": DEFAULT_DAILY_LIMIT}
+        data[u_key] = {"date": today, "count": 1, "max_limit": DEFAULT_DAILY_LIMIT, "redeemed_codes": []}
     else:
         data[u_key]["count"] = data[u_key].get("count", 0) + 1
     save_json(DAILY_USAGE_FILE, data)
@@ -307,34 +312,83 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
-async def limit_increase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Admin command: /setcode <limit> <code>
+async def setcode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
     user_id = update.effective_user.id
-    extra_amount = 3
-    if context.args and context.args[0].isdigit():
-        extra_amount = int(context.args[0])
+    if user_id != ADMIN_ID:
+        return
 
-    data = load_json(DAILY_USAGE_FILE, {})
-    today = get_ist_date_str()
-    u_key = str(user_id)
-    if u_key not in data or data[u_key].get("date") != today:
-        data[u_key] = {"date": today, "count": 0, "max_limit": DEFAULT_DAILY_LIMIT + extra_amount}
-    else:
-        cur_max = data[u_key].get("max_limit", DEFAULT_DAILY_LIMIT)
-        data[u_key]["max_limit"] = cur_max + extra_amount
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Usage:\n`/setcode 5 /gigiyrigdsyydiyjg46575` ya `/setcode 5 gigiyrigdsyydiyjg46575`", parse_mode="Markdown")
+        return
 
-    save_json(DAILY_USAGE_FILE, data)
-    used, left, max_limit = get_user_usage_stats(user_id)
-    
+    try:
+        limit_val = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Limit number hona chahiye! Example: `/setcode 5 mycode123`", parse_mode="Markdown")
+        return
+
+    raw_code = context.args[1].strip()
+    code_clean = raw_code.lstrip("/").lower()
+
+    promo_db = load_json(PROMO_CODES_FILE, {})
+    promo_db[code_clean] = limit_val
+    save_json(PROMO_CODES_FILE, promo_db)
+
     await update.message.reply_text(
-        f"🎉 **Secret Code Applied Successfully!**\n\n"
-        f"➕ Extra Limit: +{extra_amount} Orders\n"
-        f"📊 Total Limit Aaj Ka: `{max_limit}` Orders\n"
-        f"🎯 Abhi Bacha Hai: `{left}` Orders\n\n"
-        f"Ab `/start` dabakar matching chalayein!",
+        f"✅ **Secret Code Saved Successfully!**\n\n"
+        f"🔑 **Code:** `/{code_clean}`\n"
+        f"🎁 **Reward:** +{limit_val} Daily Limit\n\n"
+        f"Ab koi bhi user `/{code_clean}` send karke yeh limit claim kar sakta hai.",
         parse_mode="Markdown"
     )
+
+# Universal Handler for claiming codes
+async def text_or_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+    if update.effective_chat.type in ["group", "supergroup"]:
+        return
+
+    user_id = update.effective_user.id
+    msg_text = update.message.text.strip()
+    code_entered = msg_text.lstrip("/").lower()
+
+    promo_db = load_json(PROMO_CODES_FILE, {})
+
+    if code_entered in promo_db:
+        extra_limit = int(promo_db[code_entered])
+        data = load_json(DAILY_USAGE_FILE, {})
+        today = get_ist_date_str()
+        u_key = str(user_id)
+
+        if u_key not in data or data[u_key].get("date") != today:
+            data[u_key] = {"date": today, "count": 0, "max_limit": DEFAULT_DAILY_LIMIT, "redeemed_codes": []}
+
+        user_info = data[u_key]
+        redeemed = user_info.get("redeemed_codes", [])
+
+        if code_entered in redeemed:
+            await update.message.reply_text("⚠️ **Aap yeh code aaj pehle hi use kar chuke hain!** Kal dobara use kar sakte hain.")
+            return
+
+        redeemed.append(code_entered)
+        user_info["redeemed_codes"] = redeemed
+        user_info["max_limit"] = user_info.get("max_limit", DEFAULT_DAILY_LIMIT) + extra_limit
+        save_json(DAILY_USAGE_FILE, data)
+
+        used, left, max_limit = get_user_usage_stats(user_id)
+        await update.message.reply_text(
+            f"🎉 **Secret Code Applied!**\n\n"
+            f"➕ Added: +{extra_limit} Orders\n"
+            f"📊 Total Limit: `{max_limit}` Orders\n"
+            f"🎯 Bacha Hua Limit: `{left}` Orders\n\n"
+            f"Ab `/start` dabakar matching start karein!",
+            parse_mode="Markdown"
+        )
+        return
 
 async def dismiss_all_popups(page):
     for _ in range(4):
@@ -1115,9 +1169,11 @@ def main():
     )
     
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
-    app.add_handler(CommandHandler("limitincrease", limit_increase_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("setcode", setcode_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
+    # Catch any text / command to verify secret codes
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, text_or_command_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
     
     print("✅ AR Wallet Free Trial Bot Live...")
