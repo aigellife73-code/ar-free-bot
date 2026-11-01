@@ -23,7 +23,7 @@ CONFIG_FILE = "last_configs.json"
 BM_NOTIFIED_FILE = "bookmark_notified.json"
 DAILY_USAGE_FILE = "daily_usage.json"
 PROMO_CODES_FILE = "promo_codes.json"
-SESSION_DIR = "browser_sessions"   # Persistent profiles save karne ke liye folder
+SESSION_DIR = "browser_sessions"
 
 ASK_PHONE, ASK_SESSION = range(2)
 user_sessions = {}
@@ -567,31 +567,42 @@ async def switch_tab(page, tab_name: str):
     await click_back_to_order_list_clean(page)
 
 async def detect_live_payment_options(page):
-    for _ in range(3):
+    for _ in range(4):
         apps = await page.evaluate(r"""
             () => {
                 const all = Array.from(document.querySelectorAll('*'));
                 let useAnotherNode = null;
                 for (let el of all) {
-                    if ((el.innerText || '').trim().toLowerCase() === 'use another account') {
+                    const t = (el.innerText || '').trim().toLowerCase();
+                    if (t === 'use another account' || t === 'payment method' || t === 'select payment') {
                         useAnotherNode = el;
                         break;
                     }
                 }
-                if (!useAnotherNode) return [];
-                useAnotherNode.scrollIntoView({ behavior: 'instant', block: 'center' });
-                const parent = useAnotherNode.parentElement;
-                if (!parent) return [];
-                const candidates = Array.from(parent.querySelectorAll('*'));
-                const startIdx = candidates.indexOf(useAnotherNode);
                 const foundApps = [];
                 const checkList = ['phonepe', 'paytm', 'navi', 'airtel', 'freecharge', 'supermoney'];
-                for (let i = startIdx + 1; i < candidates.length; i++) {
-                    const c = candidates[i];
-                    const t = (c.innerText || '').trim().toLowerCase();
-                    for (let app of checkList) {
-                        if (t === app && !foundApps.includes(c.innerText.trim())) {
-                            foundApps.push(c.innerText.trim());
+                if (useAnotherNode) {
+                    useAnotherNode.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    const parent = useAnotherNode.parentElement || useAnotherNode;
+                    const candidates = Array.from(parent.querySelectorAll('*'));
+                    const startIdx = candidates.indexOf(useAnotherNode);
+                    for (let i = startIdx + 1; i < candidates.length; i++) {
+                        const c = candidates[i];
+                        const t = (c.innerText || '').trim().toLowerCase();
+                        for (let app of checkList) {
+                            if (t === app && !foundApps.includes(c.innerText.trim())) {
+                                foundApps.push(c.innerText.trim());
+                            }
+                        }
+                    }
+                }
+                if (foundApps.length === 0) {
+                    for (let el of all) {
+                        const t = (el.innerText || '').trim().toLowerCase();
+                        for (let app of checkList) {
+                            if (t === app && !foundApps.includes(el.innerText.trim())) {
+                                foundApps.push(el.innerText.trim());
+                            }
                         }
                     }
                 }
@@ -601,7 +612,7 @@ async def detect_live_payment_options(page):
         if apps:
             return apps
         await page.mouse.wheel(0, 300)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.6)
     return ["PhonePe"]
 
 async def click_strictly_another_account(page, app_name: str) -> bool:
@@ -611,26 +622,11 @@ async def click_strictly_another_account(page, app_name: str) -> bool:
             (targetApp) => {
                 const target = targetApp.toLowerCase();
                 const all = Array.from(document.querySelectorAll('*'));
-                let useAnotherNode = null;
                 for (let el of all) {
-                    if ((el.innerText || '').trim().toLowerCase() === 'use another account') {
-                        useAnotherNode = el;
-                        break;
-                    }
-                }
-                if (useAnotherNode) {
-                    useAnotherNode.scrollIntoView({ behavior: 'instant', block: 'center' });
-                    let parent = useAnotherNode.parentElement;
-                    if (parent) {
-                        const candidates = Array.from(parent.querySelectorAll('*'));
-                        const startIdx = candidates.indexOf(useAnotherNode);
-                        for (let i = startIdx + 1; i < candidates.length; i++) {
-                            const c = candidates[i];
-                            if ((c.innerText || '').trim().toLowerCase() === target) {
-                                c.click();
-                                return true;
-                            }
-                        }
+                    const t = (el.innerText || '').trim().toLowerCase();
+                    if (t === target) {
+                        el.click();
+                        return true;
                     }
                 }
                 return false;
@@ -778,14 +774,11 @@ async def stop_all_user_sessions(chat_id_int, context):
 
 async def run_direct_session(chat_id, phone, session_data, context, auto_start_matching=False):
     s_key = f"{chat_id}_{phone}"
-    
-    # Har account ke liye alag persistent folder banayein taki cookies aur storage save rahein
     user_profile_dir = os.path.join(SESSION_DIR, f"profile_{chat_id}_{phone}")
     os.makedirs(user_profile_dir, exist_ok=True)
     
     try:
         async with async_playwright() as p:
-            # Persistent context launch karna taki login session bar-bar expire na ho
             browser_context = await p.chromium.launch_persistent_context(
                 user_data_dir=user_profile_dir,
                 headless=True,
@@ -806,8 +799,6 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
             
             try:
                 target_url = "https://clbsk.paywivo.com/#/buy/arb"
-                
-                # Pehle localStorage me session data inject karein agar session_data available hai
                 if session_data and isinstance(session_data, dict) and len(session_data) > 0:
                     await page.goto("https://clbsk.paywivo.com", wait_until="commit", timeout=25000)
                     await page.wait_for_load_state("domcontentloaded")
@@ -1108,7 +1099,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text(f"⏳ **`{phone}`**: Scanning options...", parse_mode="Markdown")
         await select_and_strictly_verify_tag(page, range_val)
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.5)
         buy_tapped = False
         buys = page.locator('button:has-text("Buy"), div:has-text("Buy")')
         for i in range(await buys.count()):
