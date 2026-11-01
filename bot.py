@@ -23,7 +23,6 @@ CONFIG_FILE = "last_configs.json"
 BM_NOTIFIED_FILE = "bookmark_notified.json"
 DAILY_USAGE_FILE = "daily_usage.json"
 PROMO_CODES_FILE = "promo_codes.json"
-SESSION_DIR = "browser_sessions"
 
 ASK_PHONE, ASK_SESSION = range(2)
 user_sessions = {}
@@ -167,8 +166,10 @@ def get_active_sessions_for_user(chat_id_int: int):
     prefix = f"{chat_id_int}_"
     return [k for k in user_sessions.keys() if k.startswith(prefix) and user_sessions[k].get("running")]
 
+# Naye session ko poori tarah clean karke save karne ka function
 def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
     accs = load_accounts()
+    # Puraane sabhi data ko hata kar sirf is active phone ka naya aur fresh session save karein
     accs[uid_str] = {phone: sess_json}
     save_accounts(accs)
 
@@ -567,42 +568,31 @@ async def switch_tab(page, tab_name: str):
     await click_back_to_order_list_clean(page)
 
 async def detect_live_payment_options(page):
-    for _ in range(4):
+    for _ in range(3):
         apps = await page.evaluate(r"""
             () => {
                 const all = Array.from(document.querySelectorAll('*'));
                 let useAnotherNode = null;
                 for (let el of all) {
-                    const t = (el.innerText || '').trim().toLowerCase();
-                    if (t === 'use another account' || t === 'payment method' || t === 'select payment') {
+                    if ((el.innerText || '').trim().toLowerCase() === 'use another account') {
                         useAnotherNode = el;
                         break;
                     }
                 }
+                if (!useAnotherNode) return [];
+                useAnotherNode.scrollIntoView({ behavior: 'instant', block: 'center' });
+                const parent = useAnotherNode.parentElement;
+                if (!parent) return [];
+                const candidates = Array.from(parent.querySelectorAll('*'));
+                const startIdx = candidates.indexOf(useAnotherNode);
                 const foundApps = [];
                 const checkList = ['phonepe', 'paytm', 'navi', 'airtel', 'freecharge', 'supermoney'];
-                if (useAnotherNode) {
-                    useAnotherNode.scrollIntoView({ behavior: 'instant', block: 'center' });
-                    const parent = useAnotherNode.parentElement || useAnotherNode;
-                    const candidates = Array.from(parent.querySelectorAll('*'));
-                    const startIdx = candidates.indexOf(useAnotherNode);
-                    for (let i = startIdx + 1; i < candidates.length; i++) {
-                        const c = candidates[i];
-                        const t = (c.innerText || '').trim().toLowerCase();
-                        for (let app of checkList) {
-                            if (t === app && !foundApps.includes(c.innerText.trim())) {
-                                foundApps.push(c.innerText.trim());
-                            }
-                        }
-                    }
-                }
-                if (foundApps.length === 0) {
-                    for (let el of all) {
-                        const t = (el.innerText || '').trim().toLowerCase();
-                        for (let app of checkList) {
-                            if (t === app && !foundApps.includes(el.innerText.trim())) {
-                                foundApps.push(el.innerText.trim());
-                            }
+                for (let i = startIdx + 1; i < candidates.length; i++) {
+                    const c = candidates[i];
+                    const t = (c.innerText || '').trim().toLowerCase();
+                    for (let app of checkList) {
+                        if (t === app && !foundApps.includes(c.innerText.trim())) {
+                            foundApps.push(c.innerText.trim());
                         }
                     }
                 }
@@ -612,7 +602,7 @@ async def detect_live_payment_options(page):
         if apps:
             return apps
         await page.mouse.wheel(0, 300)
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(0.5)
     return ["PhonePe"]
 
 async def click_strictly_another_account(page, app_name: str) -> bool:
@@ -622,11 +612,26 @@ async def click_strictly_another_account(page, app_name: str) -> bool:
             (targetApp) => {
                 const target = targetApp.toLowerCase();
                 const all = Array.from(document.querySelectorAll('*'));
+                let useAnotherNode = null;
                 for (let el of all) {
-                    const t = (el.innerText || '').trim().toLowerCase();
-                    if (t === target) {
-                        el.click();
-                        return true;
+                    if ((el.innerText || '').trim().toLowerCase() === 'use another account') {
+                        useAnotherNode = el;
+                        break;
+                    }
+                }
+                if (useAnotherNode) {
+                    useAnotherNode.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    let parent = useAnotherNode.parentElement;
+                    if (parent) {
+                        const candidates = Array.from(parent.querySelectorAll('*'));
+                        const startIdx = candidates.indexOf(useAnotherNode);
+                        for (let i = startIdx + 1; i < candidates.length; i++) {
+                            const c = candidates[i];
+                            if ((c.innerText || '').trim().toLowerCase() === target) {
+                                c.click();
+                                return true;
+                            }
+                        }
                     }
                 }
                 return false;
@@ -734,6 +739,7 @@ async def get_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ File sahi nahi hai! Bookmark run karein ya valid JSON bhejein:", reply_markup=ReplyKeyboardRemove())
         return ASK_SESSION
     
+    # Naye session ko clean tareeqe se save karein (purana delete karke naya save hoga)
     save_user_session_clean(chat_id, phone, parsed_json)
     
     await update.message.reply_text(f"🎉 **Account `{phone}` Save Ho Gaya!**\nAb matching ke liye `/start` karein.", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
@@ -754,8 +760,8 @@ async def stop_single_session(session_key, context, notify=True):
         s = user_sessions[session_key]
         s["running"] = False
         try:
-            if "browser_context" in s:
-                await s["browser_context"].close()
+            if "browser" in s:
+                await s["browser"].close()
         except Exception:
             pass
         phone = s.get("phone", "")
@@ -774,52 +780,34 @@ async def stop_all_user_sessions(chat_id_int, context):
 
 async def run_direct_session(chat_id, phone, session_data, context, auto_start_matching=False):
     s_key = f"{chat_id}_{phone}"
-    user_profile_dir = os.path.join(SESSION_DIR, f"profile_{chat_id}_{phone}")
-    os.makedirs(user_profile_dir, exist_ok=True)
-    
     try:
         async with async_playwright() as p:
-            browser_context = await p.chromium.launch_persistent_context(
-                user_data_dir=user_profile_dir,
+            browser = await p.chromium.launch(
                 headless=True,
-                viewport={"width": 390, "height": 844},
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-setuid-sandbox",
-                    "--no-first-run",
-                    "--disable-blink-features=AutomationControlled"
-                ]
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox", "--no-first-run", "--disable-blink-features=AutomationControlled"]
             )
-            
-            page = await browser_context.new_page()
-            user_sessions[s_key] = {"browser_context": browser_context, "page": page, "phone": phone, "chat_id": chat_id, "running": True}
-            
+            context_browser = await browser.new_context(viewport={"width": 390, "height": 844}, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", has_touch=True)
+            page = await context_browser.new_page()
+            user_sessions[s_key] = {"browser": browser, "page": page, "phone": phone, "chat_id": chat_id, "running": True}
             try:
                 target_url = "https://clbsk.paywivo.com/#/buy/arb"
-                if session_data and isinstance(session_data, dict) and len(session_data) > 0:
-                    await page.goto("https://clbsk.paywivo.com", wait_until="commit", timeout=25000)
-                    await page.wait_for_load_state("domcontentloaded")
-                    await asyncio.sleep(1.0)
-                    await page.evaluate(r"""
-                        (storageMap) => {
-                            for (let k in storageMap) {
-                                const val = typeof storageMap[k] === 'object' ? JSON.stringify(storageMap[k]) : storageMap[k];
-                                localStorage.setItem(k, val);
-                            }
+                await page.goto("https://clbsk.paywivo.com", wait_until="commit", timeout=25000)
+                await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(1.5)
+                await page.evaluate(r"""
+                    (storageMap) => {
+                        for (let k in storageMap) {
+                            const val = typeof storageMap[k] === 'object' ? JSON.stringify(storageMap[k]) : storageMap[k];
+                            localStorage.setItem(k, val);
                         }
-                    """, session_data)
-                
+                    }
+                """, session_data)
                 await page.goto(target_url, wait_until="domcontentloaded")
                 await asyncio.sleep(2.5)
                 await dismiss_all_popups(page)
-                
                 if await check_is_login_page(page):
                     await send_login_expired_alert(chat_id, phone, s_key, page, context)
                     return
-                
                 await click_back_to_order_list_clean(page)
                 
                 if auto_start_matching:
@@ -871,7 +859,7 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                 if s_key in user_sessions and user_sessions[s_key]["running"]:
                     await context.bot.send_message(chat_id, f"❌ Error ({phone}): {str(e)}")
                 try:
-                    await browser_context.close()
+                    await browser.close()
                 except Exception:
                     pass
     except Exception as e:
@@ -927,7 +915,7 @@ async def matching_monitor(session_key, page, context):
                     break
                 after_text = await page.inner_text("body")
                 if any(k in after_text for k in ["Countdown to Expiry", "Use Mobile Scan code", "Matched, pending payment"]):
-                    await send_order_matched_alert(session_key, page, context, after_text)
+                    await send_order_matched_alert(s_key, page, context, after_text)
                     break
                 phone = user_sessions[session_key].get("phone", "")
                 shot = await page.screenshot()
@@ -1099,7 +1087,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await query.edit_message_text(f"⏳ **`{phone}`**: Scanning options...", parse_mode="Markdown")
         await select_and_strictly_verify_tag(page, range_val)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.2)
         buy_tapped = False
         buys = page.locator('button:has-text("Buy"), div:has-text("Buy")')
         for i in range(await buys.count()):
