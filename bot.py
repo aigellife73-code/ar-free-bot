@@ -195,7 +195,7 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.set_my_description(description="", language_code="zu")
             await context.bot.send_message(
                 chat_id=int(uid),
-                text=f"✅ **Account `{phone}` Login Session Sync Ho Gaya!**\n\nAb `/start` dabakar matching chalayein.",
+                text=f"✅ **Account `{phone}` ka Login Session Auto-Update Ho Gaya!**\n\nAb `/start` dabakar matching shuru karein.",
                 parse_mode="Markdown"
             )
     except Exception:
@@ -218,19 +218,15 @@ async def check_is_login_page(page) -> bool:
     except Exception:
         return False
 
+# Screenshot 15 jaisa clean alert bina bookmark code ke
 async def send_login_expired_alert(chat_id, phone, s_key, page, context, query_or_msg=None):
     try:
         shot = await page.screenshot()
-        bm_code = generate_user_bookmarklet(chat_id, phone)
         caption_text = (
-            f"⚠️ **Login Expire Ho Gaya!** (`{phone}`)\n\n"
-            f"Portal me login karke apna `{phone}` wala Bookmark run karein, session auto-update ho jayega!\n\n"
-            f"🔖 **Auto-Login Bookmark (`{phone}`):**\n`{bm_code}`"
+            f"⚠️ **Login Expire Ho Gaya Hai!** (`{phone}`)\n\n"
+            f"Aapka account portal se logout ho gaya hai. Kripya portal par login karke bookmark dubara run karein, login sync ho jayega."
         )
-        buttons = [
-            [InlineKeyboardButton(f"🔄 Update File ({phone})", callback_data=f"update_sess_{phone}")],
-            [InlineKeyboardButton("⛔ Cancel", callback_data=f"stop_{phone}")]
-        ]
+        buttons = [[InlineKeyboardButton("⛔ Close", callback_data=f"stop_{phone}")]]
         markup = InlineKeyboardMarkup(buttons)
         if query_or_msg and hasattr(query_or_msg, 'edit_message_caption'):
             try:
@@ -312,7 +308,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
-# /detail command for paid bot conversion
 async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
@@ -326,7 +321,6 @@ async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Go to Arbpay Paid Bot", url=PAID_BOT_LINK)]])
     await update.message.reply_text(msg, reply_markup=markup, parse_mode="Markdown", disable_web_page_preview=True)
 
-# Admin command: /setcode <limit> <code>
 async def setcode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
@@ -359,7 +353,6 @@ async def setcode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# Universal handler for redeem codes
 async def text_or_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
