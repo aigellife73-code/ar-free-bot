@@ -23,6 +23,7 @@ CONFIG_FILE = "last_configs.json"
 BM_NOTIFIED_FILE = "bookmark_notified.json"
 DAILY_USAGE_FILE = "daily_usage.json"
 PROMO_CODES_FILE = "promo_codes.json"
+SESSION_DIR = "browser_sessions"   # Persistent profiles save karne ke liye folder
 
 ASK_PHONE, ASK_SESSION = range(2)
 user_sessions = {}
@@ -166,10 +167,8 @@ def get_active_sessions_for_user(chat_id_int: int):
     prefix = f"{chat_id_int}_"
     return [k for k in user_sessions.keys() if k.startswith(prefix) and user_sessions[k].get("running")]
 
-# Naye session ko poori tarah clean karke save karne ka function
 def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
     accs = load_accounts()
-    # Puraane sabhi data ko hata kar sirf is active phone ka naya aur fresh session save karein
     accs[uid_str] = {phone: sess_json}
     save_accounts(accs)
 
@@ -739,7 +738,6 @@ async def get_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ File sahi nahi hai! Bookmark run karein ya valid JSON bhejein:", reply_markup=ReplyKeyboardRemove())
         return ASK_SESSION
     
-    # Naye session ko clean tareeqe se save karein (purana delete karke naya save hoga)
     save_user_session_clean(chat_id, phone, parsed_json)
     
     await update.message.reply_text(f"🎉 **Account `{phone}` Save Ho Gaya!**\nAb matching ke liye `/start` karein.", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
@@ -760,8 +758,8 @@ async def stop_single_session(session_key, context, notify=True):
         s = user_sessions[session_key]
         s["running"] = False
         try:
-            if "browser" in s:
-                await s["browser"].close()
+            if "browser_context" in s:
+                await s["browser_context"].close()
         except Exception:
             pass
         phone = s.get("phone", "")
@@ -780,34 +778,57 @@ async def stop_all_user_sessions(chat_id_int, context):
 
 async def run_direct_session(chat_id, phone, session_data, context, auto_start_matching=False):
     s_key = f"{chat_id}_{phone}"
+    
+    # Har account ke liye alag persistent folder banayein taki cookies aur storage save rahein
+    user_profile_dir = os.path.join(SESSION_DIR, f"profile_{chat_id}_{phone}")
+    os.makedirs(user_profile_dir, exist_ok=True)
+    
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
+            # Persistent context launch karna taki login session bar-bar expire na ho
+            browser_context = await p.chromium.launch_persistent_context(
+                user_data_dir=user_profile_dir,
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-setuid-sandbox", "--no-first-run", "--disable-blink-features=AutomationControlled"]
+                viewport={"width": 390, "height": 844},
+                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-setuid-sandbox",
+                    "--no-first-run",
+                    "--disable-blink-features=AutomationControlled"
+                ]
             )
-            context_browser = await browser.new_context(viewport={"width": 390, "height": 844}, user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", has_touch=True)
-            page = await context_browser.new_page()
-            user_sessions[s_key] = {"browser": browser, "page": page, "phone": phone, "chat_id": chat_id, "running": True}
+            
+            page = await browser_context.new_page()
+            user_sessions[s_key] = {"browser_context": browser_context, "page": page, "phone": phone, "chat_id": chat_id, "running": True}
+            
             try:
                 target_url = "https://clbsk.paywivo.com/#/buy/arb"
-                await page.goto("https://clbsk.paywivo.com", wait_until="commit", timeout=25000)
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(1.5)
-                await page.evaluate(r"""
-                    (storageMap) => {
-                        for (let k in storageMap) {
-                            const val = typeof storageMap[k] === 'object' ? JSON.stringify(storageMap[k]) : storageMap[k];
-                            localStorage.setItem(k, val);
+                
+                # Pehle localStorage me session data inject karein agar session_data available hai
+                if session_data and isinstance(session_data, dict) and len(session_data) > 0:
+                    await page.goto("https://clbsk.paywivo.com", wait_until="commit", timeout=25000)
+                    await page.wait_for_load_state("domcontentloaded")
+                    await asyncio.sleep(1.0)
+                    await page.evaluate(r"""
+                        (storageMap) => {
+                            for (let k in storageMap) {
+                                const val = typeof storageMap[k] === 'object' ? JSON.stringify(storageMap[k]) : storageMap[k];
+                                localStorage.setItem(k, val);
+                            }
                         }
-                    }
-                """, session_data)
+                    """, session_data)
+                
                 await page.goto(target_url, wait_until="domcontentloaded")
                 await asyncio.sleep(2.5)
                 await dismiss_all_popups(page)
+                
                 if await check_is_login_page(page):
                     await send_login_expired_alert(chat_id, phone, s_key, page, context)
                     return
+                
                 await click_back_to_order_list_clean(page)
                 
                 if auto_start_matching:
@@ -859,7 +880,7 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                 if s_key in user_sessions and user_sessions[s_key]["running"]:
                     await context.bot.send_message(chat_id, f"❌ Error ({phone}): {str(e)}")
                 try:
-                    await browser.close()
+                    await browser_context.close()
                 except Exception:
                     pass
     except Exception as e:
@@ -915,7 +936,7 @@ async def matching_monitor(session_key, page, context):
                     break
                 after_text = await page.inner_text("body")
                 if any(k in after_text for k in ["Countdown to Expiry", "Use Mobile Scan code", "Matched, pending payment"]):
-                    await send_order_matched_alert(s_key, page, context, after_text)
+                    await send_order_matched_alert(session_key, page, context, after_text)
                     break
                 phone = user_sessions[session_key].get("phone", "")
                 shot = await page.screenshot()
