@@ -5,6 +5,7 @@ WORKDIR /app
 COPY . /app
 
 RUN pip install --no-cache-dir python-telegram-bot playwright qrcode pillow
+RUN python -m playwright install chromium --with-deps
 
 EXPOSE 8000
 
