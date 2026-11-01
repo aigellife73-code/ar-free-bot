@@ -1,4 +1,5 @@
-import asyncio, re, json, os, io, html, wave, struct, math
+import asyncio, re, json, os, io, html, wave, struct, math, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -7,6 +8,7 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
+# Free Naya Token
 BOT_TOKEN = "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE"
 
 ACCOUNTS_FILE = "accounts_session.json"
@@ -32,6 +34,17 @@ RANGES_OTP = [
     "2000-2000", "2001-2999", "3000-4999", "5000-5000",
     "5001-6999", "7000-9999", "10000-14999", "15000-19999"
 ]
+
+class DummyServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8000))
+    server = HTTPServer(("0.0.0.0", port), DummyServer)
+    server.serve_forever()
 
 def get_ist_now():
     return datetime.now(IST)
@@ -1253,6 +1266,7 @@ async def post_init_setup(app: Application):
     asyncio.create_task(loop_sync())
 
 def main():
+    threading.Thread(target=run_dummy_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
     conv_handler = ConversationHandler(
         entry_points=[
