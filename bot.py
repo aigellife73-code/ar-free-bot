@@ -26,6 +26,7 @@ user_tab_selection = {}
 user_pay_selection = {}
 last_sync_ts = 0
 
+DEFAULT_DAILY_LIMIT = 3
 IST = timezone(timedelta(hours=5, minutes=30))
 
 RANGES_BANK = [
@@ -77,15 +78,17 @@ def get_user_usage_stats(user_id: int):
     today = get_ist_date_str()
     u_key = str(user_id)
     if u_key not in data or data[u_key].get("date") != today:
-        data[u_key] = {"date": today, "count": 0}
+        data[u_key] = {"date": today, "count": 0, "max_limit": DEFAULT_DAILY_LIMIT}
         save_json(DAILY_USAGE_FILE, data)
-        return 0, 2
+        return 0, DEFAULT_DAILY_LIMIT, DEFAULT_DAILY_LIMIT
+    
     used = data[u_key].get("count", 0)
-    left = max(0, 2 - used)
-    return used, left
+    max_limit = data[u_key].get("max_limit", DEFAULT_DAILY_LIMIT)
+    left = max(0, max_limit - used)
+    return used, left, max_limit
 
 def check_user_daily_limit(user_id: int) -> bool:
-    used, left = get_user_usage_stats(user_id)
+    used, left, max_limit = get_user_usage_stats(user_id)
     return left > 0
 
 def increment_user_daily_count(user_id: int) -> int:
@@ -93,7 +96,7 @@ def increment_user_daily_count(user_id: int) -> int:
     today = get_ist_date_str()
     u_key = str(user_id)
     if u_key not in data or data[u_key].get("date") != today:
-        data[u_key] = {"date": today, "count": 1}
+        data[u_key] = {"date": today, "count": 1, "max_limit": DEFAULT_DAILY_LIMIT}
     else:
         data[u_key]["count"] = data[u_key].get("count", 0) + 1
     save_json(DAILY_USAGE_FILE, data)
@@ -258,12 +261,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(join_msg, reply_markup=get_force_join_markup(), parse_mode="Markdown")
         return
 
-    used_orders, left_orders = get_user_usage_stats(user_id)
+    used_orders, left_orders, max_limit = get_user_usage_stats(user_id)
     if left_orders <= 0:
         limit_msg = (
             "⛔ **Aapki Free Trial Limit Khatam Ho Gayi Hai!**\n\n"
-            f"📊 **Aaj Ke Orders:** `{used_orders}/2` (Bacha hai: 0)\n\n"
-            "Free Bot me rozana sirf **2 Orders Match** karne ki limit hai.\n\n"
+            f"📊 **Aaj Ke Orders:** `{used_orders}/{max_limit}` (Bacha hai: 0)\n\n"
+            f"Free Bot me rozana sirf **{max_limit} Orders Match** karne ki limit hai.\n\n"
             "🚀 **Unlimited Orders ke liye hamara Full Bot use karein:**\n"
             f"👉 [Click Here To Open Arbpay Bot]({PAID_BOT_LINK})"
         )
@@ -285,7 +288,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             buttons.append([InlineKeyboardButton(f"📱 {phone} (Start)", callback_data=f"choose_{phone}")])
 
-    # Account add/change button label
     if len(accounts) > 0:
         buttons.append([InlineKeyboardButton("🔄 Change Account", callback_data="add_acc")])
     else:
@@ -296,7 +298,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     txt = (
         "👋 **AR Wallet Free Trial Bot**\n"
-        f"📊 **Aaj Ki Limit:** `{used_orders}/2` Orders Used\n"
+        f"📊 **Aaj Ki Limit:** `{used_orders}/{max_limit}` Orders Used\n"
         f"🎯 **Bacha Hua Limit:** `{left_orders}` Order\n\n"
         "Apna account chunein ya change karein:"
     )
@@ -304,6 +306,35 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+async def limit_increase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type in ["group", "supergroup"]:
+        return
+    user_id = update.effective_user.id
+    extra_amount = 3
+    if context.args and context.args[0].isdigit():
+        extra_amount = int(context.args[0])
+
+    data = load_json(DAILY_USAGE_FILE, {})
+    today = get_ist_date_str()
+    u_key = str(user_id)
+    if u_key not in data or data[u_key].get("date") != today:
+        data[u_key] = {"date": today, "count": 0, "max_limit": DEFAULT_DAILY_LIMIT + extra_amount}
+    else:
+        cur_max = data[u_key].get("max_limit", DEFAULT_DAILY_LIMIT)
+        data[u_key]["max_limit"] = cur_max + extra_amount
+
+    save_json(DAILY_USAGE_FILE, data)
+    used, left, max_limit = get_user_usage_stats(user_id)
+    
+    await update.message.reply_text(
+        f"🎉 **Secret Code Applied Successfully!**\n\n"
+        f"➕ Extra Limit: +{extra_amount} Orders\n"
+        f"📊 Total Limit Aaj Ka: `{max_limit}` Orders\n"
+        f"🎯 Abhi Bacha Hai: `{left}` Orders\n\n"
+        f"Ab `/start` dabakar matching chalayein!",
+        parse_mode="Markdown"
+    )
 
 async def dismiss_all_popups(page):
     for _ in range(4):
@@ -374,19 +405,19 @@ async def send_order_matched_alert(session_key, page, context, body_text):
     s["running"] = False
 
     count = increment_user_daily_count(chat_id)
-    left = max(0, 2 - count)
+    used, left, max_limit = get_user_usage_stats(chat_id)
 
     caption_text = (
         f"🚨🚨 **ORDER MATCH HO GAYA!** 🔔\n\n"
         f"📱 **Account: `{phone}`**\n"
         f"💰 **Amount: ₹ {amt}**\n"
         f"💵 **Commission: +₹ {comm}**\n\n"
-        f"📊 **Aaj Ke Orders:** `{count}/2` (Bacha hai: `{left}`)\n"
+        f"📊 **Aaj Ke Orders:** `{count}/{max_limit}` (Bacha hai: `{left}`)\n"
     )
 
-    if count >= 2:
+    if left <= 0:
         caption_text += (
-            "\n⚠️ **Aapki Free Trial Limit Khatam Ho Gayi Hai!**\n"
+            f"\n⚠️ **Aapki Free Trial Limit ({max_limit}/{max_limit}) Khatam Ho Gayi Hai!**\n"
             f"👉 Unlimited orders ke liye hamare paid bot par switch karein: [Arbpay Bot]({PAID_BOT_LINK})"
         )
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Go to Unlimited Bot", url=PAID_BOT_LINK)]])
@@ -401,7 +432,6 @@ async def send_order_matched_alert(session_key, page, context, body_text):
         reply_markup=markup,
         parse_mode="Markdown"
     )
-    # Audio Alert Hata Diya Gaya Hai
     await stop_single_session(session_key, context, notify=True)
 
 async def click_back_to_order_list_clean(page):
@@ -703,7 +733,6 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
             page = await context_browser.new_page()
             user_sessions[s_key] = {"browser": browser, "page": page, "phone": phone, "chat_id": chat_id, "running": True}
             try:
-                # Direct redirect to /buy/arb for smooth operation
                 target_url = "https://clbsk.paywivo.com/#/buy/arb"
                 await page.goto("https://clbsk.paywivo.com", wait_until="commit", timeout=25000)
                 await page.wait_for_load_state("domcontentloaded")
@@ -717,22 +746,48 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                     }
                 """, session_data)
                 await page.goto(target_url, wait_until="domcontentloaded")
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(2.5)
                 await dismiss_all_popups(page)
                 if await check_is_login_page(page):
                     await send_login_expired_alert(chat_id, phone, s_key, page, context)
                     return
                 await click_back_to_order_list_clean(page)
+                
                 if auto_start_matching:
                     confs = load_last_configs().get(phone, {})
                     target_range = confs.get("range", "2001-2999")
                     target_tab = confs.get("tab", "OTP-UPI")
                     app_name = confs.get("app", "PhonePe")
+                    
+                    user_tab_selection[s_key] = target_tab
+                    user_range_selection[s_key] = target_range
+                    user_pay_selection[s_key] = app_name
+                    
                     await switch_tab(page, target_tab)
+                    await asyncio.sleep(1.0)
                     await select_and_strictly_verify_tag(page, target_range)
-                    await page.touchscreen.tap(350, 420)
+                    await asyncio.sleep(1.2)
+                    buy_tapped = False
+                    buys = page.locator('button:has-text("Buy"), div:has-text("Buy")')
+                    for i in range(await buys.count()):
+                        box = await buys.nth(i).bounding_box()
+                        if box and box['y'] > 300 and box['x'] > 200:
+                            await page.touchscreen.tap(box['x'] + box['width']/2, box['y'] + box['height']/2)
+                            buy_tapped = True
+                            break
+                    if not buy_tapped:
+                        await page.touchscreen.tap(350, 420)
                     await asyncio.sleep(2.0)
                     await click_strictly_another_account(page, app_name)
+                    await asyncio.sleep(2.5)
+                    
+                    check_txt = await page.inner_text("body")
+                    if any(k in check_txt for k in ["Countdown to Expiry", "Use Mobile Scan code", "Input or Paste UTR", "Matched, pending payment"]):
+                        await send_order_matched_alert(s_key, page, context, check_txt)
+                        return
+                    
+                    start_shot = await page.screenshot()
+                    await context.bot.send_photo(chat_id, photo=start_shot, caption=f"🚀 **Fast Repeat Matching Started!** ({phone} | [{target_tab}] {target_range} | {app_name})", disable_notification=True)
                     asyncio.create_task(matching_monitor(s_key, page, context))
                 else:
                     buttons = [
@@ -740,6 +795,7 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                         [InlineKeyboardButton(f"⛔ Stop {phone}", callback_data=f"stop_{phone}")]
                     ]
                     await context.bot.send_message(chat_id, f"✅ **`{phone}` Ready!**\n\n1️⃣ Kaunse **Tab** me matching chalani hai?", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+                
                 while s_key in user_sessions and user_sessions[s_key]["running"]:
                     await asyncio.sleep(1)
             except Exception as e:
@@ -842,7 +898,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not check_user_daily_limit(user_id):
-        await query.answer("Daily Limit Reached (2/2 Orders)!", show_alert=True)
+        await query.answer("Daily Limit Reached!", show_alert=True)
         await start_cmd(update, context)
         return
 
@@ -865,9 +921,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if s_key in user_sessions:
             await stop_single_session(s_key, context, notify=False)
         if session_data:
-            user_tab_selection[s_key] = p_tab
-            user_range_selection[s_key] = p_range
-            user_pay_selection[s_key] = p_app
             asyncio.create_task(run_direct_session(chat_id, phone, session_data, context, auto_start_matching=True))
         return
 
@@ -914,7 +967,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await stop_single_session(s_key, context, notify=False)
         confs = load_last_configs().get(phone, {})
         p_tab, p_range, p_app = confs.get("tab", "OTP-UPI"), confs.get("range", "2001-2999"), confs.get("app", "PhonePe")
-        user_tab_selection[s_key], user_range_selection[s_key], user_pay_selection[s_key] = p_tab, p_range, p_app
         await query.edit_message_text(f"🚀 **Fast Repeat Matching!**\n📱 `{phone}`\n📂 [{p_tab}] {p_range} ({p_app})...", parse_mode="Markdown")
         asyncio.create_task(run_direct_session(chat_id, phone, session_data, context, auto_start_matching=True))
         return
@@ -1063,6 +1115,7 @@ def main():
     )
     
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("limitincrease", limit_increase_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CallbackQueryHandler(button_handler))
