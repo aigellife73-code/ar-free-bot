@@ -23,6 +23,7 @@ CONFIG_FILE = "last_configs.json"
 BM_NOTIFIED_FILE = "bookmark_notified.json"
 DAILY_USAGE_FILE = "daily_usage.json"
 PROMO_CODES_FILE = "promo_codes.json"
+SETTINGS_FILE = "bot_settings.json"
 
 ASK_PHONE, ASK_SESSION = range(2)
 user_sessions = {}
@@ -51,6 +52,9 @@ class DummyServer(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Free Bot Active!")
 
+    def log_message(self, *args):
+        pass
+
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8000))
     server = HTTPServer(("0.0.0.0", port), DummyServer)
@@ -78,17 +82,42 @@ def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
 
+# ---------------------------------------------------------------
+# DYNAMIC DEFAULT DAILY LIMIT GETTER & SETTER
+# ---------------------------------------------------------------
+def get_default_daily_limit() -> int:
+    settings = load_json(SETTINGS_FILE, {})
+    return int(settings.get("default_daily_limit", DEFAULT_DAILY_LIMIT))
+
+def set_default_daily_limit(new_limit: int):
+    old_limit = get_default_daily_limit()
+    settings = load_json(SETTINGS_FILE, {})
+    settings["default_daily_limit"] = int(new_limit)
+    save_json(SETTINGS_FILE, settings)
+
+    # Update today's active users so the new default limit applies immediately
+    data = load_json(DAILY_USAGE_FILE, {})
+    today = get_ist_date_str()
+    diff = int(new_limit) - old_limit
+    for u_key, u_info in data.items():
+        if isinstance(u_info, dict) and u_info.get("date") == today:
+            cur_max = u_info.get("max_limit", old_limit)
+            u_info["max_limit"] = max(0, cur_max + diff)
+    save_json(DAILY_USAGE_FILE, data)
+
 def get_user_usage_stats(user_id: int):
     data = load_json(DAILY_USAGE_FILE, {})
     today = get_ist_date_str()
     u_key = str(user_id)
+    def_limit = get_default_daily_limit()
+
     if u_key not in data or data[u_key].get("date") != today:
-        data[u_key] = {"date": today, "count": 0, "max_limit": DEFAULT_DAILY_LIMIT, "redeemed_codes": []}
+        data[u_key] = {"date": today, "count": 0, "max_limit": def_limit, "redeemed_codes": []}
         save_json(DAILY_USAGE_FILE, data)
-        return 0, DEFAULT_DAILY_LIMIT, DEFAULT_DAILY_LIMIT
+        return 0, def_limit, def_limit
     
     used = data[u_key].get("count", 0)
-    max_limit = data[u_key].get("max_limit", DEFAULT_DAILY_LIMIT)
+    max_limit = data[u_key].get("max_limit", def_limit)
     left = max(0, max_limit - used)
     return used, left, max_limit
 
@@ -100,8 +129,10 @@ def increment_user_daily_count(user_id: int) -> int:
     data = load_json(DAILY_USAGE_FILE, {})
     today = get_ist_date_str()
     u_key = str(user_id)
+    def_limit = get_default_daily_limit()
+
     if u_key not in data or data[u_key].get("date") != today:
-        data[u_key] = {"date": today, "count": 1, "max_limit": DEFAULT_DAILY_LIMIT, "redeemed_codes": []}
+        data[u_key] = {"date": today, "count": 1, "max_limit": def_limit, "redeemed_codes": []}
     else:
         data[u_key]["count"] = data[u_key].get("count", 0) + 1
     save_json(DAILY_USAGE_FILE, data)
@@ -166,10 +197,8 @@ def get_active_sessions_for_user(chat_id_int: int):
     prefix = f"{chat_id_int}_"
     return [k for k in user_sessions.keys() if k.startswith(prefix) and user_sessions[k].get("running")]
 
-# Naye session ko poori tarah clean karke save karne ka function
 def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
     accs = load_accounts()
-    # Puraane sabhi data ko hata kar sirf is active phone ka naya aur fresh session save karein
     accs[uid_str] = {phone: sess_json}
     save_accounts(accs)
 
@@ -241,6 +270,26 @@ async def send_login_expired_alert(chat_id, phone, s_key, page, context, query_o
         pass
     await stop_single_session(s_key, context, notify=False)
 
+def build_admin_limit_menu():
+    cur_def = get_default_daily_limit()
+    presets = [1, 2, 3, 5, 10, 15, 20, 50]
+    buttons, row = [], []
+    for p in presets:
+        prefix = "✅ " if cur_def == p else ""
+        row.append(InlineKeyboardButton(f"{prefix}{p} Orders", callback_data=f"setdeflim_{p}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_start")])
+    txt = (
+        f"⚙️ **Admin: Default Daily Limit Settings**\n\n"
+        f"📊 **Current Default Limit:** `{cur_def}` Orders / Day\n\n"
+        f"👇 Niche button dabakar sabhi users ke liye Default Limit change karein (ya `/setlimit 5` type karein):"
+    )
+    return txt, InlineKeyboardMarkup(buttons)
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
@@ -265,7 +314,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     used_orders, left_orders, max_limit = get_user_usage_stats(user_id)
-    if left_orders <= 0:
+    if left_orders <= 0 and user_id != ADMIN_ID:
         limit_msg = (
             "⛔ **Aapki Free Trial Limit Khatam Ho Gayi Hai!**\n\n"
             f"📊 **Aaj Ke Orders:** `{used_orders}/{max_limit}` (Bacha hai: 0)\n\n"
@@ -296,6 +345,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         buttons.append([InlineKeyboardButton("➕ Add Account", callback_data="add_acc")])
 
+    if user_id == ADMIN_ID:
+        cur_def = get_default_daily_limit()
+        buttons.append([InlineKeyboardButton(f"⚙️ Admin: Default Limit ({cur_def})", callback_data="admin_limit_menu")])
+
     if active_keys:
         buttons.append([InlineKeyboardButton("⛔ Stop All Tasks", callback_data="stop_all")])
 
@@ -322,6 +375,33 @@ async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     markup = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Go to Arbpay Paid Bot", url=PAID_BOT_LINK)]])
     await update.message.reply_text(msg, reply_markup=markup, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def setlimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type in ["group", "supergroup"]:
+        return
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    if not context.args:
+        txt, markup = build_admin_limit_menu()
+        await update.message.reply_text(txt, reply_markup=markup, parse_mode="Markdown")
+        return
+
+    try:
+        new_val = int(context.args[0])
+        if new_val < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Kripya valid number dalein! Example: `/setlimit 5`", parse_mode="Markdown")
+        return
+
+    set_default_daily_limit(new_val)
+    await update.message.reply_text(
+        f"✅ **Default Daily Limit Updated!**\n\n"
+        f"🎯 **New Default Limit:** `{new_val}` Orders / Day",
+        parse_mode="Markdown"
+    )
 
 async def setcode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
@@ -372,9 +452,10 @@ async def text_or_command_handler(update: Update, context: ContextTypes.DEFAULT_
         data = load_json(DAILY_USAGE_FILE, {})
         today = get_ist_date_str()
         u_key = str(user_id)
+        def_limit = get_default_daily_limit()
 
         if u_key not in data or data[u_key].get("date") != today:
-            data[u_key] = {"date": today, "count": 0, "max_limit": DEFAULT_DAILY_LIMIT, "redeemed_codes": []}
+            data[u_key] = {"date": today, "count": 0, "max_limit": def_limit, "redeemed_codes": []}
 
         user_info = data[u_key]
         redeemed = user_info.get("redeemed_codes", [])
@@ -385,7 +466,7 @@ async def text_or_command_handler(update: Update, context: ContextTypes.DEFAULT_
 
         redeemed.append(code_entered)
         user_info["redeemed_codes"] = redeemed
-        user_info["max_limit"] = user_info.get("max_limit", DEFAULT_DAILY_LIMIT) + extra_limit
+        user_info["max_limit"] = user_info.get("max_limit", def_limit) + extra_limit
         save_json(DAILY_USAGE_FILE, data)
 
         used, left, max_limit = get_user_usage_stats(user_id)
@@ -478,7 +559,7 @@ async def send_order_matched_alert(session_key, page, context, body_text):
         f"📊 **Aaj Ke Orders:** `{count}/{max_limit}` (Bacha hai: `{left}`)\n"
     )
 
-    if left <= 0:
+    if left <= 0 and chat_id != ADMIN_ID:
         caption_text += (
             f"\n⚠️ **Aapki Free Trial Limit ({max_limit}/{max_limit}) Khatam Ho Gayi Hai!**\n"
             f"👉 Unlimited orders ke liye hamare paid bot par switch karein: [Arbpay Bot]({PAID_BOT_LINK})"
@@ -739,7 +820,6 @@ async def get_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ File sahi nahi hai! Bookmark run karein ya valid JSON bhejein:", reply_markup=ReplyKeyboardRemove())
         return ASK_SESSION
     
-    # Naye session ko clean tareeqe se save karein (purana delete karke naya save hoga)
     save_user_session_clean(chat_id, phone, parsed_json)
     
     await update.message.reply_text(f"🎉 **Account `{phone}` Save Ho Gaya!**\nAb matching ke liye `/start` karein.", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
@@ -915,7 +995,7 @@ async def matching_monitor(session_key, page, context):
                     break
                 after_text = await page.inner_text("body")
                 if any(k in after_text for k in ["Countdown to Expiry", "Use Mobile Scan code", "Matched, pending payment"]):
-                    await send_order_matched_alert(s_key, page, context, after_text)
+                    await send_order_matched_alert(session_key, page, context, after_text)
                     break
                 phone = user_sessions[session_key].get("phone", "")
                 shot = await page.screenshot()
@@ -941,6 +1021,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
+    # Admin Default Limit Menu & Actions
+    if data == "admin_limit_menu":
+        if user_id != ADMIN_ID:
+            return
+        txt, markup = build_admin_limit_menu()
+        await query.edit_message_text(txt, reply_markup=markup, parse_mode="Markdown")
+        return
+
+    if data.startswith("setdeflim_"):
+        if user_id != ADMIN_ID:
+            return
+        new_lim = int(data.replace("setdeflim_", ""))
+        set_default_daily_limit(new_lim)
+        txt, markup = build_admin_limit_menu()
+        await query.edit_message_text(txt, reply_markup=markup, parse_mode="Markdown")
+        return
+
     if data == "check_join":
         is_joined = await is_member_of_group(user_id, context)
         if is_joined:
@@ -954,7 +1051,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_cmd(update, context)
         return
 
-    if not check_user_daily_limit(user_id):
+    if not check_user_daily_limit(user_id) and user_id != ADMIN_ID:
         await query.answer("Daily Limit Reached!", show_alert=True)
         await start_cmd(update, context)
         return
@@ -1173,6 +1270,7 @@ def main():
     
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("detail", detail_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("setlimit", setlimit_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("setcode", setcode_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
