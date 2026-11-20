@@ -1,4 +1,4 @@
-import asyncio, re, json, os, io, threading, urllib.request
+import asyncio, re, json, os, io, threading, urllib.request, urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -10,7 +10,11 @@ from playwright.async_api import async_playwright
 
 BOT_TOKEN = "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE"
 GROQ_API_KEY = "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"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODELS = [
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+]
 
 # Admin ID
 ADMIN_ID = 5773956827
@@ -35,6 +39,7 @@ user_pay_selection = {}
 user_pay_options_map = {}
 last_sync_ts = 0
 last_gm_date = ""
+group_boot_announced = False
 
 DEFAULT_DAILY_LIMIT = 3
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -87,62 +92,92 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------------------
-# GROQ AI FOR TELEGRAM GROUP (NO MENTION NEEDED + 6 AM GM)
+# GROQ AI FOR TELEGRAM GROUP (NO MENTION + 6 AM GM + ONE-TIME RUN MSG)
 # ---------------------------------------------------------------
-def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 450) -> str:
+def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.85,
-        "max_tokens": max_tokens
-    }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "User-Agent": "Mozilla/5.0"
-        },
-        method="POST"
-    )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        res_data = json.loads(resp.read().decode("utf-8"))
-        choices = res_data.get("choices") or []
-        if choices:
-            return (choices[0].get("message", {}).get("content") or "").strip()
-    return "Koi jawab generate nahi ho paya."
+    last_err = ""
+    for mdl in GROQ_MODELS:
+        payload = {
+            "model": mdl,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.85,
+            "max_tokens": max_tokens
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "User-Agent": "Mozilla/5.0"
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                res_data = json.loads(resp.read().decode("utf-8"))
+                choices = res_data.get("choices") or []
+                if choices:
+                    txt = (choices[0].get("message", {}).get("content") or "").strip()
+                    if txt:
+                        return txt
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code} ({mdl})"
+            if e.code in (400, 404):
+                continue
+            raise RuntimeError(last_err)
+        except Exception as e:
+            last_err = str(e)
+            continue
+    raise RuntimeError(last_err or "Groq API response empty")
 
 async def ask_group_ai(prompt_text: str, sender_name: str = "Dost") -> str:
     loop = asyncio.get_running_loop()
     sys_p = (
         "Tu ek mast, funny, energetic aur entertaining Telegram group AI dost hai. "
-        "Hinglish (Hindi + English) mein reply de. Group mein masti, banter, entertainment "
-        "aur beech-beech mein games (cricket, GTA, action/open-world games, fun game facts/challenges) "
-        "ki baatein bhi natural tarike se daal. Short, punchy aur engaging jawab de."
+        "Hinglish mein reply de. Group ke 'AR Wallet' order matching game, players ki masti, "
+        "aur entertainment ke hisaab se chat kar. Short, punchy aur mazedar jawab de."
     )
-    return await loop.run_in_executor(None, _call_groq_sync, sys_p, f"[{sender_name}]: {prompt_text}", 420)
+    return await loop.run_in_executor(None, _call_groq_sync, sys_p, f"[{sender_name}]: {prompt_text}", 400)
 
 async def generate_6am_group_message() -> str:
     loop = asyncio.get_running_loop()
     sys_p = (
-        "Tu ek energetic aur entertaining Telegram group AI hai. Har roz subah 6 baje group mein dhoom machane "
-        "wala Hinglish Good Morning message likhta hai. Usme:\n"
-        "1. Zabardast Good Morning wish\n"
-        "2. Masti aur fun style mein poochhna ki aaj raat / subah kitna kamaya?\n"
-        "3. Thoda entertainment / funny line aur ek chhoti si game ke baare mein baat, tip ya fun sawal."
+        "Tu ek energetic Telegram group AI hai. Har roz subah 6 baje group mein zabardast Hinglish "
+        "Good Morning message likhta hai. Usme:\n"
+        "1. Good Morning wish\n"
+        "2. Masti mein poochhna ki aaj subah/raat kitna kamaya?\n"
+        "3. AR Wallet matching game aur entertainment ke style mein ek chhoti si fun baat ya challenge."
     )
     return await loop.run_in_executor(
         None,
         _call_groq_sync,
         sys_p,
-        "Aaj subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + game/entertainment message likh.",
-        450
+        "Subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + AR Wallet game masti likh.",
+        420
     )
+
+async def generate_bot_online_group_message() -> str:
+    loop = asyncio.get_running_loop()
+    sys_p = (
+        "Tu ek energetic Hinglish group AI hai. Bot abhi live/run ho gaya hai aur tu group mein "
+        "sirf ek hi mazedar message bhej raha hai jisme batana hai ki bot run ho gaya hai, "
+        "AR Wallet matching game shuru ho sakta hai, aur thoda fun/entertainment vibe ho."
+    )
+    try:
+        return await loop.run_in_executor(
+            None,
+            _call_groq_sync,
+            sys_p,
+            "Bot run ho gaya hai, group mein ek mast message likh AR Wallet game ke mahaul ke saath.",
+            220
+        )
+    except Exception:
+        return "🔥 Bot run ho gaya hai! AR Wallet ka game ab full form mein shuru ho sakta hai — kaun aaj sabse zyada match nikalega?"
 
 async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -163,7 +198,7 @@ async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if clean_prompt.lower().startswith("/ai"):
         clean_prompt = clean_prompt[3:].strip()
     if not clean_prompt:
-        clean_prompt = "Hii! Kya haal chal hain?"
+        clean_prompt = "Hii! AR Wallet game ka kya haal hai?"
 
     sender_name = update.effective_user.first_name if update.effective_user else "Player"
     try:
@@ -1519,6 +1554,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id, f"❌ Error ({phone}): {str(e)}")
 
 async def post_init_setup(app: Application):
+    global group_boot_announced
+
     async def loop_sync():
         while True:
             await asyncio.sleep(2.5)
@@ -1526,8 +1563,24 @@ async def post_init_setup(app: Application):
                 await poll_bookmark_sync(app)
             except Exception:
                 pass
+
+    async def send_once_on_run():
+        global group_boot_announced
+        if group_boot_announced:
+            return
+        group_boot_announced = True
+        await asyncio.sleep(2.0)
+        target_group = f"@{FORCE_GROUP_USERNAME}" if FORCE_GROUP_USERNAME else ""
+        if target_group:
+            try:
+                boot_msg = await generate_bot_online_group_message()
+                await app.bot.send_message(chat_id=target_group, text=boot_msg[:4000])
+            except Exception:
+                pass
+
     asyncio.create_task(loop_sync())
     asyncio.create_task(poll_6am_group_greeting(app))
+    asyncio.create_task(send_once_on_run())
 
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
