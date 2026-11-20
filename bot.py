@@ -1,4 +1,4 @@
-import asyncio, re, json, os, io, threading
+import asyncio, re, json, os, io, threading, urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -9,6 +9,8 @@ from telegram.ext import (
 from playwright.async_api import async_playwright
 
 BOT_TOKEN = "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE"
+GROQ_API_KEY = "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"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # Admin ID
 ADMIN_ID = 5773956827
@@ -30,7 +32,9 @@ user_sessions = {}
 user_range_selection = {}
 user_tab_selection = {}
 user_pay_selection = {}
+user_pay_options_map = {}
 last_sync_ts = 0
+last_gm_date = ""
 
 DEFAULT_DAILY_LIMIT = 3
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -83,6 +87,113 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------------------
+# GROQ AI FOR TELEGRAM GROUP (NO MENTION NEEDED + 6 AM GM)
+# ---------------------------------------------------------------
+def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 450) -> str:
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.85,
+        "max_tokens": max_tokens
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "User-Agent": "Mozilla/5.0"
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        res_data = json.loads(resp.read().decode("utf-8"))
+        choices = res_data.get("choices") or []
+        if choices:
+            return (choices[0].get("message", {}).get("content") or "").strip()
+    return "Koi jawab generate nahi ho paya."
+
+async def ask_group_ai(prompt_text: str, sender_name: str = "Dost") -> str:
+    loop = asyncio.get_running_loop()
+    sys_p = (
+        "Tu ek mast, funny, energetic aur entertaining Telegram group AI dost hai. "
+        "Hinglish (Hindi + English) mein reply de. Group mein masti, banter, entertainment "
+        "aur beech-beech mein games (cricket, GTA, action/open-world games, fun game facts/challenges) "
+        "ki baatein bhi natural tarike se daal. Short, punchy aur engaging jawab de."
+    )
+    return await loop.run_in_executor(None, _call_groq_sync, sys_p, f"[{sender_name}]: {prompt_text}", 420)
+
+async def generate_6am_group_message() -> str:
+    loop = asyncio.get_running_loop()
+    sys_p = (
+        "Tu ek energetic aur entertaining Telegram group AI hai. Har roz subah 6 baje group mein dhoom machane "
+        "wala Hinglish Good Morning message likhta hai. Usme:\n"
+        "1. Zabardast Good Morning wish\n"
+        "2. Masti aur fun style mein poochhna ki aaj raat / subah kitna kamaya?\n"
+        "3. Thoda entertainment / funny line aur ek chhoti si game ke baare mein baat, tip ya fun sawal."
+    )
+    return await loop.run_in_executor(
+        None,
+        _call_groq_sync,
+        sys_p,
+        "Aaj subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + game/entertainment message likh.",
+        450
+    )
+
+async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        return
+    if update.effective_user and update.effective_user.is_bot:
+        return
+
+    raw_text = update.message.text.strip()
+    if len(raw_text) < 2:
+        return
+
+    bot_username = (context.bot.username or "").lower()
+    clean_prompt = raw_text
+    if bot_username:
+        clean_prompt = re.sub(rf"@{re.escape(context.bot.username)}", "", clean_prompt, flags=re.I).strip()
+    if clean_prompt.lower().startswith("/ai"):
+        clean_prompt = clean_prompt[3:].strip()
+    if not clean_prompt:
+        clean_prompt = "Hii! Kya haal chal hain?"
+
+    sender_name = update.effective_user.first_name if update.effective_user else "Player"
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception:
+        pass
+
+    try:
+        reply = await ask_group_ai(clean_prompt, sender_name)
+        await update.message.reply_text(reply[:4000])
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ AI Error: {str(e)}")
+
+async def poll_6am_group_greeting(app: Application):
+    global last_gm_date
+    while True:
+        await asyncio.sleep(25)
+        try:
+            now_ist = get_ist_now()
+            today_str = now_ist.strftime("%Y-%m-%d")
+            if now_ist.hour == 6 and now_ist.minute == 0 and last_gm_date != today_str:
+                last_gm_date = today_str
+                msg_txt = await generate_6am_group_message()
+                target_group = f"@{FORCE_GROUP_USERNAME}" if FORCE_GROUP_USERNAME else ""
+                if target_group:
+                    await app.bot.send_message(chat_id=target_group, text=msg_txt[:4000])
+        except Exception:
+            pass
+
+# ---------------------------------------------------------------
 # DYNAMIC DEFAULT DAILY LIMIT GETTER & SETTER
 # ---------------------------------------------------------------
 def get_default_daily_limit() -> int:
@@ -95,7 +206,6 @@ def set_default_daily_limit(new_limit: int):
     settings["default_daily_limit"] = int(new_limit)
     save_json(SETTINGS_FILE, settings)
 
-    # Update today's active users so the new default limit applies immediately
     data = load_json(DAILY_USAGE_FILE, {})
     today = get_ist_date_str()
     diff = int(new_limit) - old_limit
@@ -362,6 +472,28 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+async def screenshot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type in ["group", "supergroup"]:
+        return
+    chat_id = update.effective_chat.id
+    active_keys = get_active_sessions_for_user(chat_id)
+    target_key = active_keys[0] if active_keys else None
+    if not target_key:
+        for k, s in user_sessions.items():
+            if s.get("chat_id") == chat_id and s.get("page"):
+                target_key = k
+                break
+    if not target_key or "page" not in user_sessions[target_key]:
+        await update.message.reply_text("⚠️ Koi active browser session nahi chal raha hai.")
+        return
+    try:
+        page = user_sessions[target_key]["page"]
+        phone = user_sessions[target_key].get("phone", "")
+        shot = await page.screenshot()
+        await update.message.reply_photo(photo=shot, caption=f"📸 Current Screen ({phone})", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Screenshot error: {str(e)}")
 
 async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
@@ -648,80 +780,237 @@ async def switch_tab(page, tab_name: str):
     await asyncio.sleep(1.0)
     await click_back_to_order_list_clean(page)
 
-async def detect_live_payment_options(page):
+# ---------------------------------------------------------------
+# NEW BUY / PAYMENT ACCOUNT & EXPAND DETECTION
+# ---------------------------------------------------------------
+async def tap_buy_button_clean(page):
     for _ in range(3):
-        apps = await page.evaluate(r"""
-            () => {
-                const all = Array.from(document.querySelectorAll('*'));
-                let useAnotherNode = null;
-                for (let el of all) {
-                    if ((el.innerText || '').trim().toLowerCase() === 'use another account') {
-                        useAnotherNode = el;
-                        break;
-                    }
-                }
-                if (!useAnotherNode) return [];
-                useAnotherNode.scrollIntoView({ behavior: 'instant', block: 'center' });
-                const parent = useAnotherNode.parentElement;
-                if (!parent) return [];
-                const candidates = Array.from(parent.querySelectorAll('*'));
-                const startIdx = candidates.indexOf(useAnotherNode);
-                const foundApps = [];
-                const checkList = ['phonepe', 'paytm', 'navi', 'airtel', 'freecharge', 'supermoney'];
-                for (let i = startIdx + 1; i < candidates.length; i++) {
-                    const c = candidates[i];
-                    const t = (c.innerText || '').trim().toLowerCase();
-                    for (let app of checkList) {
-                        if (t === app && !foundApps.includes(c.innerText.trim())) {
-                            foundApps.push(c.innerText.trim());
-                        }
-                    }
-                }
-                return foundApps;
-            }
-        """)
-        if apps:
-            return apps
-        await page.mouse.wheel(0, 300)
-        await asyncio.sleep(0.5)
-    return ["PhonePe"]
-
-async def click_strictly_another_account(page, app_name: str) -> bool:
-    target = app_name.lower()
-    for _ in range(5):
-        clicked = await page.evaluate(r"""
-            (targetApp) => {
-                const target = targetApp.toLowerCase();
-                const all = Array.from(document.querySelectorAll('*'));
-                let useAnotherNode = null;
-                for (let el of all) {
-                    if ((el.innerText || '').trim().toLowerCase() === 'use another account') {
-                        useAnotherNode = el;
-                        break;
-                    }
-                }
-                if (useAnotherNode) {
-                    useAnotherNode.scrollIntoView({ behavior: 'instant', block: 'center' });
-                    let parent = useAnotherNode.parentElement;
-                    if (parent) {
-                        const candidates = Array.from(parent.querySelectorAll('*'));
-                        const startIdx = candidates.indexOf(useAnotherNode);
-                        for (let i = startIdx + 1; i < candidates.length; i++) {
-                            const c = candidates[i];
-                            if ((c.innerText || '').trim().toLowerCase() === target) {
-                                c.click();
-                                return true;
+        try:
+            res = await page.evaluate(r"""
+                () => {
+                    const els = Array.from(document.querySelectorAll('button, div, span, a'));
+                    for (let el of els) {
+                        const t = (el.innerText || '').trim();
+                        if (t === 'Buy') {
+                            const r = el.getBoundingClientRect();
+                            if (r.width >= 45 && r.height >= 22 && r.height <= 90 && r.top > 240 && r.top < 780) {
+                                el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                el.click();
+                                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                const r2 = el.getBoundingClientRect();
+                                return { ok: true, x: r2.left + r2.width / 2, y: r2.top + r2.height / 2 };
                             }
                         }
                     }
+                    return { ok: false };
                 }
-                return false;
+            """)
+            if res.get("ok"):
+                if res.get("x") and res.get("y"):
+                    await page.touchscreen.tap(res["x"], res["y"])
+                await asyncio.sleep(1.2)
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)
+    await page.touchscreen.tap(340, 420)
+    await asyncio.sleep(1.0)
+    return False
+
+async def click_expand_in_popup(page):
+    clicked_any = False
+    for _ in range(3):
+        try:
+            pts = await page.evaluate(r"""
+                () => {
+                    const out = [];
+                    for (const el of document.querySelectorAll('button, div, span, a, p')) {
+                        const t = ((el.innerText || el.textContent || '')).trim().toLowerCase();
+                        if (t === 'expand' || t.startsWith('expand')) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 2 && r.height > 2) {
+                                el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                el.click();
+                                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                const r2 = el.getBoundingClientRect();
+                                out.push({ x: r2.left + r2.width / 2, y: r2.top + r2.height / 2, top: r2.top });
+                            }
+                        }
+                    }
+                    out.sort((a, b) => a.top - b.top);
+                    return out;
+                }
+            """)
+            if pts:
+                for p in pts:
+                    await page.mouse.click(p["x"], p["y"])
+                    await page.touchscreen.tap(p["x"], p["y"])
+                    clicked_any = True
+                    await asyncio.sleep(0.65)
+                return True
+        except Exception:
+            pass
+        await page.mouse.wheel(0, 220)
+        await asyncio.sleep(0.35)
+    return clicked_any
+
+async def detect_live_payment_options(page):
+    saved_list = []
+    other_list = []
+    seen = set()
+
+    def add_opt(lst, val):
+        cl = re.sub(r"\s+", " ", (val or "").strip())
+        if not cl or len(cl) > 75 or "*" in cl:
+            return
+        low = cl.lower()
+        if low in [
+            "please select payment account:",
+            "please be sure to use the selected platform for payment, otherwise the payment will fail 100% and you will bear the loss yourself.",
+            "otp payment", "other otp payment", "otp-based payment", "otp",
+            "disconnected", "connected", "expand", "collapse", "use another account", "buy"
+        ]:
+            return
+        if low not in seen:
+            seen.add(low)
+            lst.append(cl)
+
+    await click_expand_in_popup(page)
+
+    for _ in range(3):
+        try:
+            u_items = await page.evaluate(r"""
+                () => {
+                    const res = [];
+                    const all = Array.from(document.querySelectorAll('*'));
+                    const txt = document.body.innerText || '';
+                    const m1 = txt.match(/[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+/g) || [];
+                    const m2 = txt.match(/[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]*\.{2,}/g) || [];
+                    for (const u of [...m1, ...m2]) {
+                        const cu = u.trim();
+                        if (cu.length >= 4 && !cu.includes('*')) {
+                            let lbl = '';
+                            for (const el of all) {
+                                const et = (el.innerText || '');
+                                if (et.includes(cu) && et.length < 240) {
+                                    const le = et.toLowerCase();
+                                    if (le.includes('navi')) lbl = 'navi';
+                                    else if (le.includes('phonepe')) lbl = 'PhonePe';
+                                    else if (le.includes('paytm')) lbl = 'Paytm';
+                                    else if (le.includes('airtel')) lbl = 'Airtel';
+                                    else if (le.includes('supermoney')) lbl = 'Supermoney';
+                                    else if (le.includes('moneyview')) lbl = 'MoneyView';
+                                    break;
+                                }
+                            }
+                            res.push(lbl ? `${cu} (${lbl})` : cu);
+                        }
+                    }
+                    return res;
+                }
+            """)
+        except Exception:
+            u_items = []
+        for it in (u_items or []):
+            add_opt(saved_list, it)
+        await page.mouse.wheel(0, 220)
+        await asyncio.sleep(0.35)
+
+    await click_expand_in_popup(page)
+
+    for _ in range(4):
+        try:
+            o_items = await page.evaluate(r"""
+                () => {
+                    const res = [];
+                    const known = ['Phonepe', 'PhonePe', 'Airtel', 'airtel', 'Supermoney', 'navi', 'Navi', 'MoneyView', 'Paytm', 'MobiKwik', 'Freecharge'];
+                    for (const el of document.querySelectorAll('button, div, span, a, p')) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width <= 12 || r.height <= 8 || r.height >= 190) continue;
+                        for (const ln of (el.innerText || '').split('\n')) {
+                            const t = ln.trim();
+                            for (const ka of known) {
+                                if (t.toLowerCase() === ka.toLowerCase()) res.push(t);
+                            }
+                        }
+                    }
+                    return res;
+                }
+            """)
+        except Exception:
+            o_items = []
+        for it in (o_items or []):
+            add_opt(other_list, it)
+        await page.mouse.wheel(0, 240)
+        await asyncio.sleep(0.35)
+
+    combined = saved_list + other_list
+    return combined if combined else ["PhonePe", "navi", "Airtel", "Supermoney"]
+
+async def click_strictly_another_account(page, app_name: str) -> bool:
+    raw_clean = re.sub(r"\s*\([^)]+\)\s*$", "", app_name or "").strip()
+    target = re.sub(r"\s+", " ", (raw_clean or app_name).lower().strip())
+    prefix_target = target.split("...")[0].strip() if "..." in target else target
+    app_hint = ""
+    m_hint = re.search(r"\(([^)]+)\)\s*$", app_name or "")
+    if m_hint:
+        app_hint = m_hint.group(1).strip().lower()
+    elif target in ["phonepe", "navi", "airtel", "supermoney", "moneyview", "paytm", "mobikwik", "freecharge"]:
+        app_hint = target
+
+    for attempt in range(6):
+        clicked = await page.evaluate(r"""
+            (opts) => {
+                const target = (opts.target || '').toLowerCase().trim();
+                const prefix = (opts.prefix || target).toLowerCase().trim();
+                const hint = (opts.hint || '').toLowerCase().trim();
+                const all = Array.from(document.querySelectorAll('button, div, span, a, p'));
+
+                for (const el of all) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 12 || r.height < 8 || r.height > 240) continue;
+                    const rawT = (el.innerText || '').trim();
+                    const normT = rawT.replace(/\s+/g, ' ').toLowerCase();
+                    const cleanNorm = normT.replace(/\.{3,}/g, '').trim();
+
+                    const matched = (
+                        normT === target ||
+                        (prefix && cleanNorm.startsWith(prefix)) ||
+                        (target.includes('@') && (normT.includes(target) || (prefix && normT.includes(prefix)))) ||
+                        (!target.includes('@') && hint && normT === hint)
+                    );
+
+                    if (matched) {
+                        let clickEl = el;
+                        let cur = el.parentElement;
+                        for (let d = 0; d < 4 && cur; d++) {
+                            const cr = cur.getBoundingClientRect();
+                            if (cr.width >= 120 && cr.height >= 32 && cr.height <= 190 && !cur.innerText.includes('Please select payment account')) {
+                                clickEl = cur;
+                                break;
+                            }
+                            cur = cur.parentElement;
+                        }
+                        clickEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+                        clickEl.click();
+                        clickEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                        const finalR = clickEl.getBoundingClientRect();
+                        return { ok: true, x: finalR.left + finalR.width / 2, y: finalR.top + finalR.height / 2 };
+                    }
+                }
+                return { ok: false };
             }
-        """, target)
-        if clicked:
+        """, {"target": target, "prefix": prefix_target, "hint": app_hint})
+        if clicked.get("ok"):
+            if clicked.get("x") and clicked.get("y"):
+                await page.touchscreen.tap(clicked["x"], clicked["y"])
             return True
-        await page.mouse.wheel(0, 350)
-        await asyncio.sleep(0.6)
+        if attempt == 0:
+            await click_expand_in_popup(page)
+        else:
+            await page.mouse.wheel(0, 240)
+            await asyncio.sleep(0.4)
+
     await page.touchscreen.tap(200, 715)
     return True
 
@@ -904,17 +1193,8 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                     await asyncio.sleep(1.0)
                     await select_and_strictly_verify_tag(page, target_range)
                     await asyncio.sleep(1.2)
-                    buy_tapped = False
-                    buys = page.locator('button:has-text("Buy"), div:has-text("Buy")')
-                    for i in range(await buys.count()):
-                        box = await buys.nth(i).bounding_box()
-                        if box and box['y'] > 300 and box['x'] > 200:
-                            await page.touchscreen.tap(box['x'] + box['width']/2, box['y'] + box['height']/2)
-                            buy_tapped = True
-                            break
-                    if not buy_tapped:
-                        await page.touchscreen.tap(350, 420)
-                    await asyncio.sleep(2.0)
+                    await tap_buy_button_clean(page)
+                    await asyncio.sleep(1.5)
                     await click_strictly_another_account(page, app_name)
                     await asyncio.sleep(2.5)
                     
@@ -1021,7 +1301,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
-    # Admin Default Limit Menu & Actions
     if data == "admin_limit_menu":
         if user_id != ADMIN_ID:
             return
@@ -1182,27 +1461,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await check_is_login_page(page):
             await send_login_expired_alert(chat_id, phone, s_key, page, context, query)
             return
-        await query.edit_message_text(f"⏳ **`{phone}`**: Scanning options...", parse_mode="Markdown")
+        await query.edit_message_text(f"⏳ **`{phone}`**: Buy & Payment options scan ho rahe hain...", parse_mode="Markdown")
         await select_and_strictly_verify_tag(page, range_val)
         await asyncio.sleep(1.2)
-        buy_tapped = False
-        buys = page.locator('button:has-text("Buy"), div:has-text("Buy")')
-        for i in range(await buys.count()):
-            box = await buys.nth(i).bounding_box()
-            if box and box['y'] > 300 and box['x'] > 200:
-                await page.touchscreen.tap(box['x'] + box['width']/2, box['y'] + box['height']/2)
-                buy_tapped = True
-                break
-        if not buy_tapped:
-            await page.touchscreen.tap(350, 420)
-        await asyncio.sleep(2.0)
+        await tap_buy_button_clean(page)
+        await asyncio.sleep(1.5)
         if await check_is_login_page(page):
             await send_login_expired_alert(chat_id, phone, s_key, page, context, query)
             return
         live_apps = await detect_live_payment_options(page)
+        user_pay_options_map[s_key] = live_apps
         buttons, row = [], []
-        for app in live_apps:
-            row.append(InlineKeyboardButton(app, callback_data=f"pay_{app}_{phone}"))
+        for idx_opt, app in enumerate(live_apps):
+            row.append(InlineKeyboardButton(app, callback_data=f"pay_{idx_opt}_{phone}"))
             if len(row) == 2:
                 buttons.append(row); row = []
         if row:
@@ -1212,11 +1483,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("pay_"):
         parts = data.split("_")
-        app_name, phone = parts[1], parts[2]
+        opt_raw, phone = parts[1], parts[2]
         s_key = f"{chat_id}_{phone}"
         if s_key not in user_sessions:
             await query.edit_message_text("Session expire ho gaya. /start karein.")
             return
+        opts_cached = user_pay_options_map.get(s_key) or []
+        if opt_raw.isdigit() and int(opt_raw) < len(opts_cached):
+            app_name = opts_cached[int(opt_raw)]
+        else:
+            app_name = opt_raw
         target_range = user_range_selection.get(s_key, "2001-2999")
         target_tab = user_tab_selection.get(s_key, "OTP-UPI")
         user_pay_selection[s_key] = app_name
@@ -1251,6 +1527,7 @@ async def post_init_setup(app: Application):
             except Exception:
                 pass
     asyncio.create_task(loop_sync())
+    asyncio.create_task(poll_6am_group_greeting(app))
 
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
@@ -1268,7 +1545,13 @@ def main():
         allow_reentry=True
     )
     
+    # Group AI handlers (bina @mention ke bhi jawab)
+    app.add_handler(CommandHandler("ai", group_ai_handler, filters=filters.ChatType.GROUPS))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_ai_handler))
+
+    # Private bot handlers
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
+    app.add_handler(CommandHandler("screenshot", screenshot_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("detail", detail_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("setlimit", setlimit_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("setcode", setcode_cmd, filters=filters.ChatType.PRIVATE))
