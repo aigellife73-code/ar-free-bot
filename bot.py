@@ -8,9 +8,8 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
-BOT_TOKEN = "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE"
-GEMINI_API_KEY = "GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
@@ -128,6 +127,8 @@ def _next_varied_fallback(prompt_text: str, sender_name: str) -> str:
     return msg
 
 def _call_gemini_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY not set")
     ctx = ssl.create_default_context()
     last_err = ""
     for mdl in GEMINI_MODELS:
