@@ -13,7 +13,8 @@ GROQ_API_KEY = "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"
 GROQ_MODELS = [
     "llama-3.1-8b-instant",
     "llama-3.3-70b-versatile",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "gemma2-9b-it",
+    "mixtral-8x7b-32768",
 ]
 
 # Admin ID
@@ -127,9 +128,7 @@ def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420)
                         return txt
         except urllib.error.HTTPError as e:
             last_err = f"HTTP {e.code} ({mdl})"
-            if e.code in (400, 404):
-                continue
-            raise RuntimeError(last_err)
+            continue
         except Exception as e:
             last_err = str(e)
             continue
@@ -153,13 +152,16 @@ async def generate_6am_group_message() -> str:
         "2. Masti mein poochhna ki aaj subah/raat kitna kamaya?\n"
         "3. AR Wallet matching game aur entertainment ke style mein ek chhoti si fun baat ya challenge."
     )
-    return await loop.run_in_executor(
-        None,
-        _call_groq_sync,
-        sys_p,
-        "Subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + AR Wallet game masti likh.",
-        420
-    )
+    try:
+        return await loop.run_in_executor(
+            None,
+            _call_groq_sync,
+            sys_p,
+            "Subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + AR Wallet game masti likh.",
+            420
+        )
+    except Exception:
+        return "🌅 Good Morning dosto! Uth gaye ya abhi bhi sapno mein order match kar rahe ho? Batao aaj subah/raat kitna kamaya — AR Wallet ka game shuru karein?"
 
 async def generate_bot_online_group_message() -> str:
     loop = asyncio.get_running_loop()
@@ -209,8 +211,10 @@ async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         reply = await ask_group_ai(clean_prompt, sender_name)
         await update.message.reply_text(reply[:4000])
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ AI Error: {str(e)}")
+    except Exception:
+        await update.message.reply_text(
+            f"🔥 Kya haal hai {sender_name}! AR Wallet ka game full chal raha hai — bata aaj kaun sabse zyada match nikalega?"
+        )
 
 async def poll_6am_group_greeting(app: Application):
     global last_gm_date
@@ -260,7 +264,7 @@ def get_user_usage_stats(user_id: int):
         data[u_key] = {"date": today, "count": 0, "max_limit": def_limit, "redeemed_codes": []}
         save_json(DAILY_USAGE_FILE, data)
         return 0, def_limit, def_limit
-    
+
     used = data[u_key].get("count", 0)
     max_limit = data[u_key].get("max_limit", def_limit)
     left = max(0, max_limit - used)
@@ -533,7 +537,7 @@ async def screenshot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def detail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
-    
+
     msg = (
         "🔒 **Feature Locked in Free Version!**\n\n"
         "📊 Detailed Reports, Commission Analytics, aur Daily Order History sirf **Paid / Premium Bot** me available hai.\n\n"
@@ -1098,7 +1102,7 @@ async def select_and_strictly_verify_tag(page, target_range: str) -> bool:
 async def add_acc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = update.effective_user.id
-    
+
     if not await is_member_of_group(user_id, context):
         await query.answer("Pehle group join karein!", show_alert=True)
         await start_cmd(update, context)
@@ -1115,7 +1119,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ASK_PHONE
     chat_id = str(update.effective_chat.id)
     context.user_data['temp_phone'] = phone
-    
+
     bm = generate_user_bookmarklet(chat_id, phone)
     msg = (
         f"✅ **Number `{phone}` Register Ho Gaya!**\n\n"
@@ -1143,9 +1147,9 @@ async def get_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("❌ File sahi nahi hai! Bookmark run karein ya valid JSON bhejein:", reply_markup=ReplyKeyboardRemove())
         return ASK_SESSION
-    
+
     save_user_session_clean(chat_id, phone, parsed_json)
-    
+
     await update.message.reply_text(f"🎉 **Account `{phone}` Save Ho Gaya!**\nAb matching ke liye `/start` karein.", reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
     return ConversationHandler.END
 
@@ -1213,17 +1217,17 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                     await send_login_expired_alert(chat_id, phone, s_key, page, context)
                     return
                 await click_back_to_order_list_clean(page)
-                
+
                 if auto_start_matching:
                     confs = load_last_configs().get(phone, {})
                     target_range = confs.get("range", "2001-2999")
                     target_tab = confs.get("tab", "OTP-UPI")
                     app_name = confs.get("app", "PhonePe")
-                    
+
                     user_tab_selection[s_key] = target_tab
                     user_range_selection[s_key] = target_range
                     user_pay_selection[s_key] = app_name
-                    
+
                     await switch_tab(page, target_tab)
                     await asyncio.sleep(1.0)
                     await select_and_strictly_verify_tag(page, target_range)
@@ -1232,12 +1236,12 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                     await asyncio.sleep(1.5)
                     await click_strictly_another_account(page, app_name)
                     await asyncio.sleep(2.5)
-                    
+
                     check_txt = await page.inner_text("body")
                     if any(k in check_txt for k in ["Countdown to Expiry", "Use Mobile Scan code", "Input or Paste UTR", "Matched, pending payment"]):
                         await send_order_matched_alert(s_key, page, context, check_txt)
                         return
-                    
+
                     start_shot = await page.screenshot()
                     await context.bot.send_photo(chat_id, photo=start_shot, caption=f"🚀 **Fast Repeat Matching Started!** ({phone} | [{target_tab}] {target_range} | {app_name})", disable_notification=True)
                     asyncio.create_task(matching_monitor(s_key, page, context))
@@ -1247,7 +1251,7 @@ async def run_direct_session(chat_id, phone, session_data, context, auto_start_m
                         [InlineKeyboardButton(f"⛔ Stop {phone}", callback_data=f"stop_{phone}")]
                     ]
                     await context.bot.send_message(chat_id, f"✅ **`{phone}` Ready!**\n\n1️⃣ Kaunse **Tab** me matching chalani hai?", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
-                
+
                 while s_key in user_sessions and user_sessions[s_key]["running"]:
                     await asyncio.sleep(1)
             except Exception as e:
@@ -1585,7 +1589,7 @@ async def post_init_setup(app: Application):
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
-    
+
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(add_acc_callback, pattern="^add_acc$"),
@@ -1597,7 +1601,7 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_conv, filters=filters.ChatType.PRIVATE), CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE)],
         allow_reentry=True
     )
-    
+
     # Group AI handlers (bina @mention ke bhi jawab)
     app.add_handler(CommandHandler("ai", group_ai_handler, filters=filters.ChatType.GROUPS))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_ai_handler))
@@ -1612,7 +1616,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, text_or_command_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
-    
+
     print("✅ AR Wallet Free Trial Bot Live...")
     app.run_polling()
 
