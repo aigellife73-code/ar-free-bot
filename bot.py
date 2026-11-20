@@ -9,11 +9,11 @@ from telegram.ext import (
 from playwright.async_api import async_playwright
 
 BOT_TOKEN = "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE"
-GROQ_API_KEY = "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"
-GROQ_MODELS = [
-    "llama-3.1-8b-instant",
-    "llama-3.3-70b-versatile",
-    "gemma2-9b-it",
+GEMINI_API_KEY = "GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+"
+GEMINI_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
 ]
 
 # Admin ID
@@ -93,7 +93,7 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------------------
-# GROQ AI FOR TELEGRAM GROUP (VARIED REPLIES + NO REPEAT)
+# GEMINI AI FOR TELEGRAM GROUP (NO MENTION + 6 AM GM + ONE-TIME RUN MSG)
 # ---------------------------------------------------------------
 def _next_varied_fallback(prompt_text: str, sender_name: str) -> str:
     global fallback_idx
@@ -127,54 +127,67 @@ def _next_varied_fallback(prompt_text: str, sender_name: str) -> str:
     fallback_idx += 1
     return msg
 
-def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 380) -> str:
-    url = "https://api.groq.com/openai/v1/chat/completions"
+def _call_gemini_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420) -> str:
     ctx = ssl.create_default_context()
-    for mdl in GROQ_MODELS:
+    last_err = ""
+    for mdl in GEMINI_MODELS:
+        endpoint = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent"
+            f"?key={GEMINI_API_KEY}"
+        )
         payload = {
-            "model": mdl,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+            "systemInstruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": user_prompt}]
+                }
             ],
-            "temperature": 0.9,
-            "max_tokens": max_tokens
+            "generationConfig": {
+                "temperature": 0.9,
+                "maxOutputTokens": max_tokens,
+            }
         }
         req = urllib.request.Request(
-            url,
+            endpoint,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0"
             },
             method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=18, context=ctx) as resp:
-                res_data = json.loads(resp.read().decode("utf-8"))
-                choices = res_data.get("choices") or []
-                if choices:
-                    txt = (choices[0].get("message", {}).get("content") or "").strip()
-                    if txt:
-                        return txt
+            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                cands = data.get("candidates") or []
+                if cands:
+                    parts = (cands[0].get("content") or {}).get("parts") or []
+                    out_txt = "".join((p.get("text") or "") for p in parts).strip()
+                    if out_txt:
+                        return out_txt
         except urllib.error.HTTPError as e:
-            if e.code in (400, 404, 422):
+            last_err = f"HTTP {e.code} ({mdl})"
+            if e.code in (400, 403, 404, 429):
                 continue
-            raise RuntimeError(f"HTTP {e.code}")
-        except Exception:
+            raise RuntimeError(last_err)
+        except Exception as e:
+            last_err = str(e)
             continue
-    raise RuntimeError("Groq unavailable")
+    raise RuntimeError(last_err or "Gemini API unavailable")
 
 async def ask_group_ai(prompt_text: str, sender_name: str = "Dost") -> str:
     loop = asyncio.get_running_loop()
     sys_p = (
         "Tu ek mast, funny, energetic aur entertaining Telegram group AI dost hai. "
         "Hinglish mein reply de. Har baar alag aur fresh tarike se baat kar — ek hi line repeat mat kar. "
-        "Group ke 'AR Wallet' order matching game, masti, entertainment aur games ki baatein natural tarike se kar."
+        "Group ke 'AR Wallet' order matching game, masti, entertainment aur games ki baatein natural tarike se kar. "
+        "Jawab short, punchy aur mazedar rakh."
     )
     try:
-        return await loop.run_in_executor(None, _call_groq_sync, sys_p, f"[{sender_name}]: {prompt_text}", 380)
+        return await loop.run_in_executor(None, _call_gemini_sync, sys_p, f"[{sender_name}]: {prompt_text}", 380)
     except Exception:
         return _next_varied_fallback(prompt_text, sender_name)
 
@@ -190,10 +203,10 @@ async def generate_6am_group_message() -> str:
     try:
         return await loop.run_in_executor(
             None,
-            _call_groq_sync,
+            _call_gemini_sync,
             sys_p,
             "Subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + AR Wallet game masti likh.",
-            400
+            420
         )
     except Exception:
         return "🌅 Good Morning dosto! Uth gaye ya abhi bhi sapno mein order match kar rahe ho? Batao aaj subah/raat kitna kamaya — AR Wallet ka game shuru karein?"
@@ -208,7 +221,7 @@ async def generate_bot_online_group_message() -> str:
     try:
         return await loop.run_in_executor(
             None,
-            _call_groq_sync,
+            _call_gemini_sync,
             sys_p,
             "Bot run ho gaya hai, group mein ek mast message likh AR Wallet game ke mahaul ke saath.",
             220
