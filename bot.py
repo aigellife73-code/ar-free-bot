@@ -9,7 +9,10 @@ from telegram.ext import (
 from playwright.async_api import async_playwright
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE").strip()
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_API_KEY = os.environ.get(
+    "GROQ_API_KEY",
+    "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"
+).strip()
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
@@ -96,7 +99,7 @@ def save_json(path, data):
 # GROQ AI (PURE AI REPLIES: PERSONAL /ai + GROUP + 6 AM GM + BOOT)
 # ---------------------------------------------------------------
 def _get_groq_key() -> str:
-    key = os.environ.get("GROQ_API_KEY", "").strip() or GROQ_API_KEY
+    key = (os.environ.get("GROQ_API_KEY") or GROQ_API_KEY or "").strip()
     if key.startswith("Gsk_"):
         key = "gsk_" + key[4:]
     return key
@@ -104,7 +107,7 @@ def _get_groq_key() -> str:
 def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 450) -> str:
     api_key = _get_groq_key()
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY Render Environment me set nahi hai")
+        raise RuntimeError("GROQ_API_KEY set nahi hai")
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     ctx = ssl.create_default_context()
