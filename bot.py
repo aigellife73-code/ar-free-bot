@@ -1,4 +1,4 @@
-import asyncio, re, json, os, io, threading, urllib.request, urllib.error
+import asyncio, re, json, os, io, ssl, threading, urllib.request, urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -14,7 +14,6 @@ GROQ_MODELS = [
     "llama-3.1-8b-instant",
     "llama-3.3-70b-versatile",
     "gemma2-9b-it",
-    "mixtral-8x7b-32768",
 ]
 
 # Admin ID
@@ -41,6 +40,7 @@ user_pay_options_map = {}
 last_sync_ts = 0
 last_gm_date = ""
 group_boot_announced = False
+fallback_idx = 0
 
 DEFAULT_DAILY_LIMIT = 3
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -93,11 +93,43 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------------------
-# GROQ AI FOR TELEGRAM GROUP (NO MENTION + 6 AM GM + ONE-TIME RUN MSG)
+# GROQ AI FOR TELEGRAM GROUP (VARIED REPLIES + NO REPEAT)
 # ---------------------------------------------------------------
-def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420) -> str:
+def _next_varied_fallback(prompt_text: str, sender_name: str) -> str:
+    global fallback_idx
+    low = (prompt_text or "").lower()
+    if any(w in low for w in ["kaha", "kidhar", "where", "manish"]):
+        pool = [
+            f"Lagta hai {sender_name} dhoondh raha hai, kahin match ke chakkar mein hide toh nahi ho gaya? 😄",
+            f"Arey {sender_name}, group mein hi kahin aas-paas hoga ya naya order match kar raha hoga!",
+            f"Kahin {sender_name} ki bhookh ya game dono active hain — aate hi khabar lag jayegi!",
+        ]
+    elif any(w in low for w in ["kamaya", "profit", "earning", "paisa", "match", "order"]):
+        pool = [
+            f"Batao {sender_name}, aaj kitne match phode aur pocket mein kitna aaya? 💰",
+            f"Aaj {sender_name} ka luck kaisa chal raha hai? Range lock karo aur dhoom machao!",
+            f"Order matching game mein aaj {sender_name} top par aayega ya koi aur baazi maarega? 🔥",
+        ]
+    elif any(w in low for w in ["game", "khel", "play", "gta", "cricket", "bgmi", "free fire"]):
+        pool = [
+            f"Gaming ki baat nikli toh bata {sender_name}, aaj AR Wallet match chalana hai ya koi solid game khelna hai? 🎮",
+            f"Mast mahaul hai {sender_name}! Game ho ya matching, speed aur timing dono matter karti hain ⚡",
+            f"Aaj kaun sa game chal raha hai {sender_name}? Group mein full entertainment on hai! 😎",
+        ]
+    else:
+        pool = [
+            f"Sun raha hoon {sender_name}! Kya chal raha hai aaj, full masti ke mood mein ho kya? 😄",
+            f"Bolo {sender_name}, aaj ka scene kya hai? Game, masti ya matching — sab ready hai! 🔥",
+            f"Haan {sender_name}, main yahi hoon! Aaj group mein kaun laane wala hai sabse zyada twist? 🎉",
+            f"Kya baat hai {sender_name}! Aaj din bhar full energy rakho aur game jamakar khelo! 💪",
+        ]
+    msg = pool[fallback_idx % len(pool)]
+    fallback_idx += 1
+    return msg
+
+def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 380) -> str:
     url = "https://api.groq.com/openai/v1/chat/completions"
-    last_err = ""
+    ctx = ssl.create_default_context()
     for mdl in GROQ_MODELS:
         payload = {
             "model": mdl,
@@ -105,7 +137,7 @@ def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420)
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "temperature": 0.85,
+            "temperature": 0.9,
             "max_tokens": max_tokens
         }
         req = urllib.request.Request(
@@ -114,12 +146,12 @@ def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420)
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {GROQ_API_KEY}",
-                "User-Agent": "Mozilla/5.0"
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
             },
             method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=18, context=ctx) as resp:
                 res_data = json.loads(resp.read().decode("utf-8"))
                 choices = res_data.get("choices") or []
                 if choices:
@@ -127,21 +159,24 @@ def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420)
                     if txt:
                         return txt
         except urllib.error.HTTPError as e:
-            last_err = f"HTTP {e.code} ({mdl})"
+            if e.code in (400, 404, 422):
+                continue
+            raise RuntimeError(f"HTTP {e.code}")
+        except Exception:
             continue
-        except Exception as e:
-            last_err = str(e)
-            continue
-    raise RuntimeError(last_err or "Groq API response empty")
+    raise RuntimeError("Groq unavailable")
 
 async def ask_group_ai(prompt_text: str, sender_name: str = "Dost") -> str:
     loop = asyncio.get_running_loop()
     sys_p = (
         "Tu ek mast, funny, energetic aur entertaining Telegram group AI dost hai. "
-        "Hinglish mein reply de. Group ke 'AR Wallet' order matching game, players ki masti, "
-        "aur entertainment ke hisaab se chat kar. Short, punchy aur mazedar jawab de."
+        "Hinglish mein reply de. Har baar alag aur fresh tarike se baat kar — ek hi line repeat mat kar. "
+        "Group ke 'AR Wallet' order matching game, masti, entertainment aur games ki baatein natural tarike se kar."
     )
-    return await loop.run_in_executor(None, _call_groq_sync, sys_p, f"[{sender_name}]: {prompt_text}", 400)
+    try:
+        return await loop.run_in_executor(None, _call_groq_sync, sys_p, f"[{sender_name}]: {prompt_text}", 380)
+    except Exception:
+        return _next_varied_fallback(prompt_text, sender_name)
 
 async def generate_6am_group_message() -> str:
     loop = asyncio.get_running_loop()
@@ -158,7 +193,7 @@ async def generate_6am_group_message() -> str:
             _call_groq_sync,
             sys_p,
             "Subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + AR Wallet game masti likh.",
-            420
+            400
         )
     except Exception:
         return "🌅 Good Morning dosto! Uth gaye ya abhi bhi sapno mein order match kar rahe ho? Batao aaj subah/raat kitna kamaya — AR Wallet ka game shuru karein?"
@@ -208,13 +243,8 @@ async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    try:
-        reply = await ask_group_ai(clean_prompt, sender_name)
-        await update.message.reply_text(reply[:4000])
-    except Exception:
-        await update.message.reply_text(
-            f"🔥 Kya haal hai {sender_name}! AR Wallet ka game full chal raha hai — bata aaj kaun sabse zyada match nikalega?"
-        )
+    reply = await ask_group_ai(clean_prompt, sender_name)
+    await update.message.reply_text(reply[:4000])
 
 async def poll_6am_group_greeting(app: Application):
     global last_gm_date
