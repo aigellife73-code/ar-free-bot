@@ -9,10 +9,12 @@ from telegram.ext import (
 from playwright.async_api import async_playwright
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE").strip()
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
 ]
 
 # Admin ID
@@ -39,7 +41,6 @@ user_pay_options_map = {}
 last_sync_ts = 0
 last_gm_date = ""
 group_boot_announced = False
-fallback_idx = 0
 
 DEFAULT_DAILY_LIMIT = 3
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -92,105 +93,74 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------------------
-# GEMINI AI FOR TELEGRAM GROUP (NO MENTION + 6 AM GM + ONE-TIME RUN MSG)
+# GROQ AI (PURE AI REPLIES: PERSONAL /ai + GROUP + 6 AM GM + BOOT)
 # ---------------------------------------------------------------
-def _next_varied_fallback(prompt_text: str, sender_name: str) -> str:
-    global fallback_idx
-    low = (prompt_text or "").lower()
-    if any(w in low for w in ["kaha", "kidhar", "where", "manish"]):
-        pool = [
-            f"Lagta hai {sender_name} dhoondh raha hai, kahin match ke chakkar mein hide toh nahi ho gaya? 😄",
-            f"Arey {sender_name}, group mein hi kahin aas-paas hoga ya naya order match kar raha hoga!",
-            f"Kahin {sender_name} ki bhookh ya game dono active hain — aate hi khabar lag jayegi!",
-        ]
-    elif any(w in low for w in ["kamaya", "profit", "earning", "paisa", "match", "order"]):
-        pool = [
-            f"Batao {sender_name}, aaj kitne match phode aur pocket mein kitna aaya? 💰",
-            f"Aaj {sender_name} ka luck kaisa chal raha hai? Range lock karo aur dhoom machao!",
-            f"Order matching game mein aaj {sender_name} top par aayega ya koi aur baazi maarega? 🔥",
-        ]
-    elif any(w in low for w in ["game", "khel", "play", "gta", "cricket", "bgmi", "free fire"]):
-        pool = [
-            f"Gaming ki baat nikli toh bata {sender_name}, aaj AR Wallet match chalana hai ya koi solid game khelna hai? 🎮",
-            f"Mast mahaul hai {sender_name}! Game ho ya matching, speed aur timing dono matter karti hain ⚡",
-            f"Aaj kaun sa game chal raha hai {sender_name}? Group mein full entertainment on hai! 😎",
-        ]
-    else:
-        pool = [
-            f"Sun raha hoon {sender_name}! Kya chal raha hai aaj, full masti ke mood mein ho kya? 😄",
-            f"Bolo {sender_name}, aaj ka scene kya hai? Game, masti ya matching — sab ready hai! 🔥",
-            f"Haan {sender_name}, main yahi hoon! Aaj group mein kaun laane wala hai sabse zyada twist? 🎉",
-            f"Kya baat hai {sender_name}! Aaj din bhar full energy rakho aur game jamakar khelo! 💪",
-        ]
-    msg = pool[fallback_idx % len(pool)]
-    fallback_idx += 1
-    return msg
+def _get_groq_key() -> str:
+    key = os.environ.get("GROQ_API_KEY", "").strip() or GROQ_API_KEY
+    if key.startswith("Gsk_"):
+        key = "gsk_" + key[4:]
+    return key
 
-def _call_gemini_sync(system_prompt: str, user_prompt: str, max_tokens: int = 420) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY not set")
+def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 450) -> str:
+    api_key = _get_groq_key()
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY Render Environment me set nahi hai")
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
     ctx = ssl.create_default_context()
     last_err = ""
-    for mdl in GEMINI_MODELS:
-        endpoint = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent"
-            f"?key={GEMINI_API_KEY}"
-        )
+
+    for mdl in GROQ_MODELS:
         payload = {
-            "systemInstruction": {
-                "parts": [{"text": system_prompt}]
-            },
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": user_prompt}]
-                }
+            "model": mdl,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ],
-            "generationConfig": {
-                "temperature": 0.9,
-                "maxOutputTokens": max_tokens,
-            }
+            "temperature": 0.85,
+            "max_tokens": max_tokens
         }
         req = urllib.request.Request(
-            endpoint,
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
                 "User-Agent": "Mozilla/5.0"
             },
             method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=25, context=ctx) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                cands = data.get("candidates") or []
-                if cands:
-                    parts = (cands[0].get("content") or {}).get("parts") or []
-                    out_txt = "".join((p.get("text") or "") for p in parts).strip()
-                    if out_txt:
-                        return out_txt
+                choices = data.get("choices") or []
+                if choices:
+                    msg = choices[0].get("message") or {}
+                    txt = (msg.get("content") or "").strip()
+                    if txt:
+                        return txt
         except urllib.error.HTTPError as e:
-            last_err = f"HTTP {e.code} ({mdl})"
-            if e.code in (400, 403, 404, 429):
-                continue
-            raise RuntimeError(last_err)
-        except Exception as e:
-            last_err = str(e)
+            err_body = ""
+            try:
+                err_body = e.read().decode("utf-8", errors="ignore")[:160]
+            except Exception:
+                pass
+            last_err = f"HTTP {e.code} ({mdl}) {err_body}".strip()
             continue
-    raise RuntimeError(last_err or "Gemini API unavailable")
+        except Exception as e:
+            last_err = f"{mdl}: {str(e)}"
+            continue
 
-async def ask_group_ai(prompt_text: str, sender_name: str = "Dost") -> str:
+    raise RuntimeError(last_err or "Groq API response empty")
+
+async def ask_ai(prompt_text: str, sender_name: str = "Dost") -> str:
     loop = asyncio.get_running_loop()
     sys_p = (
-        "Tu ek mast, funny, energetic aur entertaining Telegram group AI dost hai. "
-        "Hinglish mein reply de. Har baar alag aur fresh tarike se baat kar — ek hi line repeat mat kar. "
-        "Group ke 'AR Wallet' order matching game, masti, entertainment aur games ki baatein natural tarike se kar. "
-        "Jawab short, punchy aur mazedar rakh."
+        "Tu ek smart, funny, energetic aur entertaining AI dost hai. "
+        "Hinglish (Hindi + English) mein reply de. Har baar alag, fresh aur natural jawab de — kabhi ek hi line repeat mat kar. "
+        "AR Wallet order matching game, masti, entertainment aur games ki baatein bhi mazedar tarike se kar."
     )
-    try:
-        return await loop.run_in_executor(None, _call_gemini_sync, sys_p, f"[{sender_name}]: {prompt_text}", 380)
-    except Exception:
-        return _next_varied_fallback(prompt_text, sender_name)
+    return await loop.run_in_executor(None, _call_groq_sync, sys_p, f"[{sender_name}]: {prompt_text}", 450)
 
 async def generate_6am_group_message() -> str:
     loop = asyncio.get_running_loop()
@@ -201,16 +171,13 @@ async def generate_6am_group_message() -> str:
         "2. Masti mein poochhna ki aaj subah/raat kitna kamaya?\n"
         "3. AR Wallet matching game aur entertainment ke style mein ek chhoti si fun baat ya challenge."
     )
-    try:
-        return await loop.run_in_executor(
-            None,
-            _call_gemini_sync,
-            sys_p,
-            "Subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + AR Wallet game masti likh.",
-            420
-        )
-    except Exception:
-        return "🌅 Good Morning dosto! Uth gaye ya abhi bhi sapno mein order match kar rahe ho? Batao aaj subah/raat kitna kamaya — AR Wallet ka game shuru karein?"
+    return await loop.run_in_executor(
+        None,
+        _call_groq_sync,
+        sys_p,
+        "Subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + AR Wallet game masti likh.",
+        420
+    )
 
 async def generate_bot_online_group_message() -> str:
     loop = asyncio.get_running_loop()
@@ -219,16 +186,38 @@ async def generate_bot_online_group_message() -> str:
         "sirf ek hi mazedar message bhej raha hai jisme batana hai ki bot run ho gaya hai, "
         "AR Wallet matching game shuru ho sakta hai, aur thoda fun/entertainment vibe ho."
     )
+    return await loop.run_in_executor(
+        None,
+        _call_groq_sync,
+        sys_p,
+        "Bot run ho gaya hai, group mein ek mast message likh AR Wallet game ke mahaul ke saath.",
+        220
+    )
+
+async def ai_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    if update.effective_user and update.effective_user.is_bot:
+        return
+
+    prompt_text = " ".join(context.args).strip() if context.args else ""
+    if not prompt_text and update.message.text:
+        prompt_text = re.sub(r"^/ai(?:@\w+)?", "", update.message.text.strip(), flags=re.I).strip()
+
+    if not prompt_text:
+        prompt_text = "Hii! AI working hai na? Ek mast intro aur game/masti ki baat bata."
+
+    sender_name = update.effective_user.first_name if update.effective_user else "User"
     try:
-        return await loop.run_in_executor(
-            None,
-            _call_gemini_sync,
-            sys_p,
-            "Bot run ho gaya hai, group mein ek mast message likh AR Wallet game ke mahaul ke saath.",
-            220
-        )
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     except Exception:
-        return "🔥 Bot run ho gaya hai! AR Wallet ka game ab full form mein shuru ho sakta hai — kaun aaj sabse zyada match nikalega?"
+        pass
+
+    try:
+        reply = await ask_ai(prompt_text, sender_name)
+        await update.message.reply_text(reply[:4000])
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Groq AI Error: {str(e)}")
 
 async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -257,8 +246,11 @@ async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    reply = await ask_group_ai(clean_prompt, sender_name)
-    await update.message.reply_text(reply[:4000])
+    try:
+        reply = await ask_ai(clean_prompt, sender_name)
+        await update.message.reply_text(reply[:4000])
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Groq AI Error: {str(e)}")
 
 async def poll_6am_group_greeting(app: Application):
     global last_gm_date
@@ -1634,6 +1626,12 @@ def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
 
+    # /ai works in BOTH personal (private) and group chats
+    app.add_handler(CommandHandler("ai", ai_command_handler))
+
+    # Group AI handlers (bina @mention ke bhi jawab)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_ai_handler))
+
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(add_acc_callback, pattern="^add_acc$"),
@@ -1645,10 +1643,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_conv, filters=filters.ChatType.PRIVATE), CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE)],
         allow_reentry=True
     )
-
-    # Group AI handlers (bina @mention ke bhi jawab)
-    app.add_handler(CommandHandler("ai", group_ai_handler, filters=filters.ChatType.GROUPS))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_ai_handler))
 
     # Private bot handlers
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
