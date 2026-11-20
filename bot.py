@@ -79,6 +79,9 @@ def get_ist_now():
 def get_ist_date_str():
     return get_ist_now().strftime("%Y-%m-%d")
 
+def get_ist_time_str():
+    return get_ist_now().strftime("%I:%M %p IST")
+
 def fmt_num(v: float) -> str:
     return str(int(round(v))) if abs(v - round(v)) < 0.01 else f"{v:.2f}"
 
@@ -96,7 +99,7 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------------------
-# GROQ AI (PURE AI REPLIES: PERSONAL /ai + GROUP + 6 AM GM + BOOT)
+# GROQ AI (INDIAN TIME IST + SHORT + DESI ROAST/BANTER + NO AR WALLET)
 # ---------------------------------------------------------------
 def _get_groq_key() -> str:
     key = (os.environ.get("GROQ_API_KEY") or GROQ_API_KEY or "").strip()
@@ -104,7 +107,7 @@ def _get_groq_key() -> str:
         key = "gsk_" + key[4:]
     return key
 
-def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 450) -> str:
+def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 160) -> str:
     api_key = _get_groq_key()
     if not api_key:
         raise RuntimeError("GROQ_API_KEY set nahi hai")
@@ -120,7 +123,7 @@ def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 450)
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "temperature": 0.85,
+            "temperature": 0.95,
             "max_tokens": max_tokens
         }
         req = urllib.request.Request(
@@ -156,45 +159,51 @@ def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 450)
 
     raise RuntimeError(last_err or "Groq API response empty")
 
-async def ask_ai(prompt_text: str, sender_name: str = "Dost") -> str:
-    loop = asyncio.get_running_loop()
-    sys_p = (
-        "Tu ek smart, funny, energetic aur entertaining AI dost hai. "
-        "Hinglish (Hindi + English) mein reply de. Har baar alag, fresh aur natural jawab de — kabhi ek hi line repeat mat kar. "
-        "AR Wallet order matching game, masti, entertainment aur games ki baatein bhi mazedar tarike se kar."
+def _build_ai_system_prompt() -> str:
+    ist_now_str = get_ist_now().strftime("%d %b %Y, %I:%M %p IST")
+    return (
+        f"Current Indian time: {ist_now_str} (IST, India). "
+        "Tu ek bindass, funny, savage aur desi Hinglish group dost AI hai. "
+        "Rules: "
+        "1) Hamesha SHORT reply de (1 se 2 chhoti line, bilkul lamba paragraph mat likh). "
+        "2) AR Wallet, matching, order, range, payment ya bot ki kisi bhi bakchodi ka zikar bilkul mat kar jab tak saamne wala khud na puche. "
+        "3) Desi gaali-galauch, slang aur funny roast/banter mein baat kar (jaise bsdk, madarchod, chutiya, bkl, laude, gandu, saale) — agar koi gaali de toh palat kar mast savage/funny jawab de, dara mat. "
+        "4) Time ki baat aaye toh Indian Time (IST) hi use kar."
     )
-    return await loop.run_in_executor(None, _call_groq_sync, sys_p, f"[{sender_name}]: {prompt_text}", 450)
+
+async def ask_ai(prompt_text: str, sender_name: str = "Bhai") -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _call_groq_sync, _build_ai_system_prompt(), f"[{sender_name}]: {prompt_text}", 140)
 
 async def generate_6am_group_message() -> str:
     loop = asyncio.get_running_loop()
     sys_p = (
-        "Tu ek energetic Telegram group AI hai. Har roz subah 6 baje group mein zabardast Hinglish "
-        "Good Morning message likhta hai. Usme:\n"
-        "1. Good Morning wish\n"
-        "2. Masti mein poochhna ki aaj subah/raat kitna kamaya?\n"
-        "3. AR Wallet matching game aur entertainment ke style mein ek chhoti si fun baat ya challenge."
+        "Abhi subah 6:00 AM IST baj gaye hain (Indian Time). "
+        "Ek dum SHORT (1-2 line) desi Hinglish Good Morning message likh. "
+        "Masti/gaali-slang style mein Good Morning bol aur poochh aaj kitna kamaya. "
+        "AR Wallet ya order matching ka zikar bilkul mat kar."
     )
     return await loop.run_in_executor(
         None,
         _call_groq_sync,
         sys_p,
-        "Subah 6 baj gaye hain, group ke liye mast Good Morning + kitna kamaya + AR Wallet game masti likh.",
-        420
+        "Subah 6 baje IST ka short desi Good Morning aur kitna kamaya message likh.",
+        130
     )
 
 async def generate_bot_online_group_message() -> str:
     loop = asyncio.get_running_loop()
     sys_p = (
-        "Tu ek energetic Hinglish group AI hai. Bot abhi live/run ho gaya hai aur tu group mein "
-        "sirf ek hi mazedar message bhej raha hai jisme batana hai ki bot run ho gaya hai, "
-        "AR Wallet matching game shuru ho sakta hai, aur thoda fun/entertainment vibe ho."
+        f"Current Indian Time: {get_ist_time_str()}. "
+        "Ek dum SHORT (1 line) desi Hinglish message likh ki AI live ho gaya hai. "
+        "AR Wallet ya matching ka zikar bilkul mat kar."
     )
     return await loop.run_in_executor(
         None,
         _call_groq_sync,
         sys_p,
-        "Bot run ho gaya hai, group mein ek mast message likh AR Wallet game ke mahaul ke saath.",
-        220
+        "AI online aane ka short desi message likh.",
+        90
     )
 
 async def ai_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,9 +217,9 @@ async def ai_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         prompt_text = re.sub(r"^/ai(?:@\w+)?", "", update.message.text.strip(), flags=re.I).strip()
 
     if not prompt_text:
-        prompt_text = "Hii! AI working hai na? Ek mast intro aur game/masti ki baat bata."
+        prompt_text = "Bol bsdk, kya scene hai?"
 
-    sender_name = update.effective_user.first_name if update.effective_user else "User"
+    sender_name = update.effective_user.first_name if update.effective_user else "Bhai"
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     except Exception:
@@ -218,9 +227,9 @@ async def ai_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         reply = await ask_ai(prompt_text, sender_name)
-        await update.message.reply_text(reply[:4000])
+        await update.message.reply_text(reply[:1000])
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Groq AI Error: {str(e)}")
+        await update.message.reply_text(f"⚠️ AI Error: {str(e)}")
 
 async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -231,7 +240,7 @@ async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     raw_text = update.message.text.strip()
-    if len(raw_text) < 2:
+    if len(raw_text) < 1:
         return
 
     bot_username = (context.bot.username or "").lower()
@@ -241,9 +250,9 @@ async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if clean_prompt.lower().startswith("/ai"):
         clean_prompt = clean_prompt[3:].strip()
     if not clean_prompt:
-        clean_prompt = "Hii! AR Wallet game ka kya haal hai?"
+        clean_prompt = "Kya bol raha hai?"
 
-    sender_name = update.effective_user.first_name if update.effective_user else "Player"
+    sender_name = update.effective_user.first_name if update.effective_user else "Bhai"
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     except Exception:
@@ -251,9 +260,9 @@ async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         reply = await ask_ai(clean_prompt, sender_name)
-        await update.message.reply_text(reply[:4000])
+        await update.message.reply_text(reply[:1000])
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Groq AI Error: {str(e)}")
+        await update.message.reply_text(f"⚠️ AI Error: {str(e)}")
 
 async def poll_6am_group_greeting(app: Application):
     global last_gm_date
@@ -267,7 +276,7 @@ async def poll_6am_group_greeting(app: Application):
                 msg_txt = await generate_6am_group_message()
                 target_group = f"@{FORCE_GROUP_USERNAME}" if FORCE_GROUP_USERNAME else ""
                 if target_group:
-                    await app.bot.send_message(chat_id=target_group, text=msg_txt[:4000])
+                    await app.bot.send_message(chat_id=target_group, text=msg_txt[:1000])
         except Exception:
             pass
 
@@ -1617,7 +1626,7 @@ async def post_init_setup(app: Application):
         if target_group:
             try:
                 boot_msg = await generate_bot_online_group_message()
-                await app.bot.send_message(chat_id=target_group, text=boot_msg[:4000])
+                await app.bot.send_message(chat_id=target_group, text=boot_msg[:1000])
             except Exception:
                 pass
 
@@ -1655,7 +1664,7 @@ def main():
     app.add_handler(CommandHandler("setcode", setcode_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, text_or_command_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_or_command_handler))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     print("✅ AR Wallet Free Trial Bot Live...")
