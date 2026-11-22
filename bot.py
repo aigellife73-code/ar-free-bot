@@ -7,6 +7,7 @@ from telegram.ext import (
     filters, ContextTypes, ConversationHandler
 )
 from playwright.async_api import async_playwright
+from hourly_chat import hourly_loop
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE").strip()
 GROQ_API_KEY = os.environ.get(
@@ -1633,6 +1634,7 @@ async def post_init_setup(app: Application):
     asyncio.create_task(loop_sync())
     asyncio.create_task(poll_6am_group_greeting(app))
     asyncio.create_task(send_once_on_run())
+asyncio.create_task(hourly_loop())
 
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
