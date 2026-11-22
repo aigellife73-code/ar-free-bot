@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737580198:AAHKDgxu6pn876BeDwxctAj1nFlTPUEYRKg").strip()
 GROQ_API_KEY = os.environ.get(
     "GROQ_API_KEY",
     "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"
