@@ -7,7 +7,6 @@ from telegram.ext import (
     filters, ContextTypes, ConversationHandler
 )
 from playwright.async_api import async_playwright
-from hourly_chat import hourly_loop
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737580198:AAG2jDYE-5YI1WbufZYp2oGrzL0ZQu-7pfE").strip()
 GROQ_API_KEY = os.environ.get(
@@ -44,6 +43,7 @@ user_pay_selection = {}
 user_pay_options_map = {}
 last_sync_ts = 0
 last_gm_date = ""
+last_hourly_slot = ""
 group_boot_announced = False
 
 DEFAULT_DAILY_LIMIT = 3
@@ -100,7 +100,7 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------------------
-# GROQ AI (INDIAN TIME IST + SHORT + DESI ROAST/BANTER + NO AR WALLET)
+# GROQ AI (INDIAN TIME IST + SHORT + DESI ROAST/BANTER + HOURLY)
 # ---------------------------------------------------------------
 def _get_groq_key() -> str:
     key = (os.environ.get("GROQ_API_KEY") or GROQ_API_KEY or "").strip()
@@ -192,6 +192,22 @@ async def generate_6am_group_message() -> str:
         130
     )
 
+async def generate_hourly_group_message() -> str:
+    loop = asyncio.get_running_loop()
+    now_ist = get_ist_time_str()
+    sys_p = (
+        f"Current Indian Time: {now_ist}. "
+        "Ek dum SHORT (1-2 line) desi Hinglish banter/masti/savage line likh jo har ghante group mein bheji jaati hai. "
+        "AR Wallet, matching, order ya payment ka zikar bilkul mat kar."
+    )
+    return await loop.run_in_executor(
+        None,
+        _call_groq_sync,
+        sys_p,
+        f"({now_ist}) Har ghante wali short desi masti/banter line bhej.",
+        110
+    )
+
 async def generate_bot_online_group_message() -> str:
     loop = asyncio.get_running_loop()
     sys_p = (
@@ -277,6 +293,22 @@ async def poll_6am_group_greeting(app: Application):
                 msg_txt = await generate_6am_group_message()
                 target_group = f"@{FORCE_GROUP_USERNAME}" if FORCE_GROUP_USERNAME else ""
                 if target_group:
+                    await app.bot.send_message(chat_id=target_group, text=msg_txt[:1000])
+        except Exception:
+            pass
+
+async def poll_hourly_group_message(app: Application):
+    global last_hourly_slot
+    while True:
+        await asyncio.sleep(30)
+        try:
+            now_ist = get_ist_now()
+            slot = now_ist.strftime("%Y-%m-%d-%H")
+            if slot != last_hourly_slot:
+                last_hourly_slot = slot
+                target_group = f"@{FORCE_GROUP_USERNAME}" if FORCE_GROUP_USERNAME else ""
+                if target_group:
+                    msg_txt = await generate_hourly_group_message()
                     await app.bot.send_message(chat_id=target_group, text=msg_txt[:1000])
         except Exception:
             pass
@@ -1633,8 +1665,8 @@ async def post_init_setup(app: Application):
 
     asyncio.create_task(loop_sync())
     asyncio.create_task(poll_6am_group_greeting(app))
+    asyncio.create_task(poll_hourly_group_message(app))
     asyncio.create_task(send_once_on_run())
-asyncio.create_task(hourly_loop())
 
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
