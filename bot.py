@@ -1,4 +1,4 @@
-import asyncio, re, json, os, io, ssl, threading, urllib.request, urllib.error
+import asyncio, re, json, os, io, ssl, random, base64, threading, urllib.request, urllib.parse, urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
@@ -13,12 +13,18 @@ GROQ_API_KEY = os.environ.get(
     "GROQ_API_KEY",
     "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"
 ).strip()
-GROQ_MODELS = [
+
+GROQ_TEXT_MODELS = [
     "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
+    "qwen/qwen3-32b",
 ]
+GROQ_VISION_MODELS = [
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+]
+_discovered_models_cache = []
 
 # Admin ID
 ADMIN_ID = 5773956827
@@ -43,7 +49,6 @@ user_pay_selection = {}
 user_pay_options_map = {}
 last_sync_ts = 0
 last_gm_date = ""
-last_hourly_slot = ""
 group_boot_announced = False
 
 DEFAULT_DAILY_LIMIT = 3
@@ -100,7 +105,7 @@ def save_json(path, data):
         json.dump(data, f, indent=4)
 
 # ---------------------------------------------------------------
-# GROQ AI (INDIAN TIME IST + SHORT + DESI ROAST/BANTER + HOURLY)
+# GROQ AI + IMAGE GEN + IMAGE READ (NO HTTP ERROR SPAM)
 # ---------------------------------------------------------------
 def _get_groq_key() -> str:
     key = (os.environ.get("GROQ_API_KEY") or GROQ_API_KEY or "").strip()
@@ -108,16 +113,44 @@ def _get_groq_key() -> str:
         key = "gsk_" + key[4:]
     return key
 
-def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 160) -> str:
+def _get_groq_models_list() -> list:
+    global _discovered_models_cache
+    api_key = _get_groq_key()
+    if api_key and not _discovered_models_cache:
+        try:
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {api_key}", "User-Agent": "Mozilla/5.0"},
+                method="GET"
+            )
+            with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                ids = [m.get("id", "") for m in (data.get("data") or []) if m.get("id")]
+                chat_ids = [
+                    mid for mid in ids
+                    if not any(x in mid.lower() for x in ["whisper", "tts", "guard", "embed", "safeguard"])
+                ]
+                if chat_ids:
+                    _discovered_models_cache = chat_ids
+        except Exception:
+            pass
+
+    ordered = []
+    for m in GROQ_TEXT_MODELS + _discovered_models_cache:
+        if m and m not in ordered:
+            ordered.append(m)
+    return ordered
+
+def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 140) -> str:
     api_key = _get_groq_key()
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY set nahi hai")
+        return ""
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     ctx = ssl.create_default_context()
-    last_err = ""
+    models = _get_groq_models_list()
 
-    for mdl in GROQ_MODELS:
+    for mdl in models[:6]:
         payload = {
             "model": mdl,
             "messages": [
@@ -138,27 +171,96 @@ def _call_groq_sync(system_prompt: str, user_prompt: str, max_tokens: int = 160)
             method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=25, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=22, context=ctx) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 choices = data.get("choices") or []
                 if choices:
                     msg = choices[0].get("message") or {}
                     txt = (msg.get("content") or "").strip()
+                    txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
                     if txt:
                         return txt
         except urllib.error.HTTPError as e:
-            err_body = ""
-            try:
-                err_body = e.read().decode("utf-8", errors="ignore")[:160]
-            except Exception:
-                pass
-            last_err = f"HTTP {e.code} ({mdl}) {err_body}".strip()
+            if e.code == 404 and mdl in _discovered_models_cache:
+                _discovered_models_cache.remove(mdl)
             continue
-        except Exception as e:
-            last_err = f"{mdl}: {str(e)}"
+        except Exception:
             continue
 
-    raise RuntimeError(last_err or "Groq API response empty")
+    return ""
+
+def _read_image_with_groq_sync(img_bytes: bytes, prompt_hint: str = "") -> str:
+    api_key = _get_groq_key()
+    if not api_key or not img_bytes:
+        return ""
+
+    b64_img = base64.b64encode(img_bytes).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{b64_img}"
+    ist_now_str = get_ist_now().strftime("%d %b %Y, %I:%M %p IST")
+    sys_p = (
+        f"Current Indian time: {ist_now_str} (IST). "
+        "Tu ek bindass, funny, savage desi Hinglish dost AI hai. "
+        "Photo ko dhyan se dekh aur 1-2 short line mein mast/savage reply de. "
+        "AR Wallet ya order matching ka zikar mat kar."
+    )
+    user_txt = prompt_hint.strip() if prompt_hint.strip() else "Is photo mein kya dikh raha hai? Short desi style mein bata."
+
+    for v_mdl in GROQ_VISION_MODELS:
+        payload = {
+            "model": v_mdl,
+            "messages": [
+                {"role": "system", "content": sys_p},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_txt},
+                        {"type": "image_url", "image_url": {"url": data_url}}
+                    ]
+                }
+            ],
+            "temperature": 0.9,
+            "max_tokens": 150
+        }
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "User-Agent": "Mozilla/5.0"
+            },
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25, context=ssl.create_default_context()) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                txt = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+                if txt:
+                    return txt
+        except Exception:
+            continue
+
+    return ""
+
+def _generate_image_bytes_sync(prompt_text: str) -> bytes:
+    clean_p = (prompt_text or "funny desi meme art").strip()[:250]
+    encoded = urllib.parse.quote(clean_p)
+    seed = random.randint(1, 999999)
+    urls = [
+        f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&seed={seed}&nologo=true",
+        f"https://pollinations.ai/p/{encoded}?width=768&height=768&seed={seed}&nologo=true",
+    ]
+    ctx = ssl.create_default_context()
+    for u in urls:
+        req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"}, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                raw = resp.read()
+                if raw and len(raw) > 1500:
+                    return raw
+        except Exception:
+            continue
+    return b""
 
 def _build_ai_system_prompt() -> str:
     ist_now_str = get_ist_now().strftime("%d %b %Y, %I:%M %p IST")
@@ -192,19 +294,19 @@ async def generate_6am_group_message() -> str:
         130
     )
 
-async def generate_hourly_group_message() -> str:
+async def generate_random_group_message() -> str:
     loop = asyncio.get_running_loop()
     now_ist = get_ist_time_str()
     sys_p = (
         f"Current Indian Time: {now_ist}. "
-        "Ek dum SHORT (1-2 line) desi Hinglish banter/masti/savage line likh jo har ghante group mein bheji jaati hai. "
+        "Apne aap ek SHORT (1-2 line) desi Hinglish masti/savage/funny group message likh. "
         "AR Wallet, matching, order ya payment ka zikar bilkul mat kar."
     )
     return await loop.run_in_executor(
         None,
         _call_groq_sync,
         sys_p,
-        f"({now_ist}) Har ghante wali short desi masti/banter line bhej.",
+        f"({now_ist}) Group mein apne mann se ek short desi masti/banter line bhej.",
         110
     )
 
@@ -223,6 +325,61 @@ async def generate_bot_online_group_message() -> str:
         90
     )
 
+async def send_generated_image_and_read(update: Update, context: ContextTypes.DEFAULT_TYPE, img_prompt: str):
+    loop = asyncio.get_running_loop()
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+    except Exception:
+        pass
+
+    img_bytes = await loop.run_in_executor(None, _generate_image_bytes_sync, img_prompt)
+    if not img_bytes:
+        return
+
+    # Bot khud apni bheji image ko read karke short caption/comment banata hai
+    vision_note = await loop.run_in_executor(
+        None,
+        _read_image_with_groq_sync,
+        img_bytes,
+        f"Maine ye photo banayi ({img_prompt}). Is photo ko dekh kar 1 short desi line likh."
+    )
+    cap_txt = (vision_note or img_prompt)[:600]
+    await update.message.reply_photo(photo=io.BytesIO(img_bytes), caption=cap_txt)
+
+async def photo_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.photo:
+        return
+    if update.effective_user and update.effective_user.is_bot:
+        return
+
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        photo_obj = update.message.photo[-1]
+        tg_file = await context.bot.get_file(photo_obj.file_id)
+        img_bytes = bytes(await tg_file.download_as_bytearray())
+        cap = (update.message.caption or "").strip()
+        sender_name = update.effective_user.first_name if update.effective_user else "Bhai"
+        reply = await asyncio.get_running_loop().run_in_executor(
+            None,
+            _read_image_with_groq_sync,
+            img_bytes,
+            f"[{sender_name}]: {cap}" if cap else ""
+        )
+        if reply:
+            await update.message.reply_text(reply[:1000])
+    except Exception:
+        pass
+
+async def img_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+    prompt_text = " ".join(context.args).strip() if context.args else ""
+    if not prompt_text and update.message.text:
+        prompt_text = re.sub(r"^/img(?:@\w+)?", "", update.message.text.strip(), flags=re.I).strip()
+    if not prompt_text:
+        prompt_text = "cool desi cyberpunk style portrait"
+    await send_generated_image_and_read(update, context, prompt_text)
+
 async def ai_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -236,17 +393,19 @@ async def ai_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not prompt_text:
         prompt_text = "Bol bsdk, kya scene hai?"
 
+    if re.search(r"\b(image|photo|pic|img)\s*(bana|banao|bhej|bhejo|generate|create)\b", prompt_text, flags=re.I):
+        await send_generated_image_and_read(update, context, prompt_text)
+        return
+
     sender_name = update.effective_user.first_name if update.effective_user else "Bhai"
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     except Exception:
         pass
 
-    try:
-        reply = await ask_ai(prompt_text, sender_name)
+    reply = await ask_ai(prompt_text, sender_name)
+    if reply:
         await update.message.reply_text(reply[:1000])
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ AI Error: {str(e)}")
 
 async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -269,17 +428,19 @@ async def group_ai_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not clean_prompt:
         clean_prompt = "Kya bol raha hai?"
 
+    if re.search(r"\b(image|photo|pic|img)\s*(bana|banao|bhej|bhejo|generate|create)\b", clean_prompt, flags=re.I):
+        await send_generated_image_and_read(update, context, clean_prompt)
+        return
+
     sender_name = update.effective_user.first_name if update.effective_user else "Bhai"
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     except Exception:
         pass
 
-    try:
-        reply = await ask_ai(clean_prompt, sender_name)
+    reply = await ask_ai(clean_prompt, sender_name)
+    if reply:
         await update.message.reply_text(reply[:1000])
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ AI Error: {str(e)}")
 
 async def poll_6am_group_greeting(app: Application):
     global last_gm_date
@@ -292,26 +453,34 @@ async def poll_6am_group_greeting(app: Application):
                 last_gm_date = today_str
                 msg_txt = await generate_6am_group_message()
                 target_group = f"@{FORCE_GROUP_USERNAME}" if FORCE_GROUP_USERNAME else ""
-                if target_group:
+                if target_group and msg_txt:
                     await app.bot.send_message(chat_id=target_group, text=msg_txt[:1000])
         except Exception:
             pass
 
-async def poll_hourly_group_message(app: Application):
-    global last_hourly_slot
+async def poll_random_group_message(app: Application):
+    await asyncio.sleep(random.randint(900, 1800))
     while True:
-        await asyncio.sleep(30)
         try:
-            now_ist = get_ist_now()
-            slot = now_ist.strftime("%Y-%m-%d-%H")
-            if slot != last_hourly_slot:
-                last_hourly_slot = slot
-                target_group = f"@{FORCE_GROUP_USERNAME}" if FORCE_GROUP_USERNAME else ""
-                if target_group:
-                    msg_txt = await generate_hourly_group_message()
-                    await app.bot.send_message(chat_id=target_group, text=msg_txt[:1000])
+            target_group = f"@{FORCE_GROUP_USERNAME}" if FORCE_GROUP_USERNAME else ""
+            if target_group:
+                if random.random() < 0.35:
+                    img_bytes = await asyncio.get_running_loop().run_in_executor(
+                        None, _generate_image_bytes_sync, "funny desi street attitude cartoon"
+                    )
+                    if img_bytes:
+                        cap = await asyncio.get_running_loop().run_in_executor(
+                            None, _read_image_with_groq_sync, img_bytes, "Is photo ko dekh kar 1 short desi line likh."
+                        )
+                        await app.bot.send_photo(chat_id=target_group, photo=io.BytesIO(img_bytes), caption=(cap or "")[:500])
+                else:
+                    msg_txt = await generate_random_group_message()
+                    if msg_txt:
+                        await app.bot.send_message(chat_id=target_group, text=msg_txt[:1000])
         except Exception:
             pass
+        # Random delay between 30 mins and 90 mins
+        await asyncio.sleep(random.randint(1800, 5400))
 
 # ---------------------------------------------------------------
 # DYNAMIC DEFAULT DAILY LIMIT GETTER & SETTER
@@ -1659,21 +1828,26 @@ async def post_init_setup(app: Application):
         if target_group:
             try:
                 boot_msg = await generate_bot_online_group_message()
-                await app.bot.send_message(chat_id=target_group, text=boot_msg[:1000])
+                if boot_msg:
+                    await app.bot.send_message(chat_id=target_group, text=boot_msg[:1000])
             except Exception:
                 pass
 
     asyncio.create_task(loop_sync())
     asyncio.create_task(poll_6am_group_greeting(app))
-    asyncio.create_task(poll_hourly_group_message(app))
+    asyncio.create_task(poll_random_group_message(app))
     asyncio.create_task(send_once_on_run())
 
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
 
-    # /ai works in BOTH personal (private) and group chats
+    # /ai and /img work in BOTH personal (private) and group chats
     app.add_handler(CommandHandler("ai", ai_command_handler))
+    app.add_handler(CommandHandler("img", img_command_handler))
+
+    # Photo reading handler (reads any sent photo)
+    app.add_handler(MessageHandler(filters.PHOTO, photo_ai_handler))
 
     # Group AI handlers (bina @mention ke bhi jawab)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, group_ai_handler))
